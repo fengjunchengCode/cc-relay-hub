@@ -60,6 +60,26 @@ class StateStoreTest(unittest.TestCase):
         self.assertEqual(message["delivered_at"], 101.0)
         self.assertEqual(message["replied_at"], 130.0)
 
+    def test_message_persists_origin_and_notify_fields(self):
+        self.store.insert_message(
+            request_id="req-2",
+            sender="hub",
+            target="codex-bot",
+            session_key="feishu:s1:u1",
+            provider="cc_connect",
+            body="ping",
+            status="pending",
+            created_at=100.0,
+            origin_project="relay-bot",
+            origin_session_key="feishu:origin:u1",
+        )
+        self.store.mark_notified("req-2", 105.0)
+
+        message = self.store.get_message("req-2")
+        self.assertEqual(message["origin_project"], "relay-bot")
+        self.assertEqual(message["origin_session_key"], "feishu:origin:u1")
+        self.assertEqual(message["notified_at"], 105.0)
+
 
 if __name__ == "__main__":
     unittest.main()

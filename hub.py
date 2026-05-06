@@ -2,9 +2,11 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -13,7 +15,7 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 from core.envelope import RelayEnvelope
-from core.match import wait_for_reply_framework
+from core.match import find_request_for_session, wait_for_reply_framework
 from core.state import StateStore
 from providers.cc_connect import CCConnectProvider
 
@@ -38,9 +40,13 @@ def parse_args(argv):
     send_parser.add_argument("message")
     send_parser.add_argument("--wait", action="store_true")
     send_parser.add_argument("--timeout", type=int, default=300)
+    send_parser.add_argument("--origin-project", default=None, help=argparse.SUPPRESS)
+    send_parser.add_argument("--origin-session", default=None, help=argparse.SUPPRESS)
 
     info_parser = subparsers.add_parser("info")
     info_parser.add_argument("agent")
+
+    subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
 
     return parser.parse_args(argv)
 
@@ -156,6 +162,107 @@ def get_provider(agent):
     raise ValueError("Unsupported provider: %s" % agent["provider"])
 
 
+def resolve_origin_context(args):
+    origin_project = args.origin_project or os.environ.get("CC_PROJECT") or None
+    origin_session = args.origin_session or os.environ.get("CC_SESSION_KEY") or None
+    return origin_project, origin_session
+
+
+def _parse_event_timestamp(value):
+    if not value:
+        return time.time()
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time()
+
+
+def _build_notification_content(message, reply_text):
+    return "[cc-relay:%s]\n%s" % (message["target"], reply_text)
+
+
+def _run_cc_connect_send(command, input_text):
+    return subprocess.run(
+        command,
+        input=input_text.encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def notify_origin_reply(message, reply_text, runner=None):
+    origin_project = message.get("origin_project")
+    origin_session = message.get("origin_session_key")
+    if not origin_project or not origin_session:
+        return {"status": "skipped", "reason": "origin_missing"}
+
+    content = _build_notification_content(message, reply_text)
+    command = [
+        "cc-connect",
+        "send",
+        "-p",
+        origin_project,
+        "-s",
+        origin_session,
+        "--stdin",
+    ]
+    runner = runner or _run_cc_connect_send
+    result = runner(command, content)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        return {"status": "failed", "error": stderr or "cc-connect send failed"}
+    return {"status": "sent"}
+
+
+def handle_hook_event(payload, state_path=None, runner=None):
+    store = StateStore(str(state_path or STATE_DB_PATH))
+    event_type = payload.get("event") or payload.get("hook_event") or "unknown"
+    agent_id = payload.get("project") or payload.get("agent_id") or "unknown"
+    session_key = payload.get("session_key") or ""
+    content = payload.get("content") or ""
+    timestamp = _parse_event_timestamp(payload.get("timestamp"))
+    message = None
+
+    if event_type != "message.sent" or not session_key:
+        store.append_event(
+            event_type=event_type,
+            agent_id=agent_id,
+            request_id=None,
+            session_key=session_key or None,
+            content=content,
+            timestamp=timestamp,
+        )
+        return {"status": "ignored", "reason": "unsupported_event"}
+
+    message = find_request_for_session(store, session_key)
+    store.append_event(
+        event_type=event_type,
+        agent_id=agent_id,
+        request_id=message["request_id"] if message else None,
+        session_key=session_key,
+        content=content,
+        timestamp=timestamp,
+    )
+    if not message:
+        return {"status": "unmatched", "session_key": session_key}
+
+    store.mark_replied(message["request_id"], content, timestamp)
+    store.release_session_lock(session_key, message["request_id"])
+
+    notify = notify_origin_reply(message, content, runner=runner)
+    if notify["status"] == "sent":
+        store.mark_notified(message["request_id"], time.time())
+    elif notify["status"] == "failed":
+        store.mark_notify_failed(message["request_id"], notify["error"])
+
+    return {
+        "status": "matched",
+        "request_id": message["request_id"],
+        "notify": notify,
+    }
+
+
 def format_status(agent):
     provider = get_provider(agent)
     health = provider.get_health()
@@ -228,13 +335,10 @@ def cmd_send(args):
     provider = get_provider(agent)
     state = StateStore(str(STATE_DB_PATH))
     session_key = agent["binding"].get("session_key", "")
+    origin_project, origin_session = resolve_origin_context(args)
 
     if not session_key:
         print("Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"])
-        return 1
-
-    if state.has_active_lock(session_key) and not args.wait:
-        print("busy: session %s already has a pending request" % session_key)
         return 1
 
     request_id = uuid.uuid4().hex
@@ -257,22 +361,22 @@ def cmd_send(args):
         body=envelope.body,
         status="pending",
         created_at=now,
+        origin_project=origin_project,
+        origin_session_key=origin_session,
     )
 
-    if args.wait:
-        locked = state.acquire_session_lock(session_key, request_id, args.timeout)
-        if not locked:
-            state.mark_failed(request_id, "busy")
-            print("busy: session %s already has a pending request" % session_key)
-            return 1
+    locked = state.acquire_session_lock(session_key, request_id, args.timeout)
+    if not locked:
+        state.mark_failed(request_id, "busy")
+        print("busy: session %s already has a pending request" % session_key)
+        return 1
 
     is_control = args.message.startswith("/") and provider.supports_control()
     if is_control:
         result = provider.execute_command(args.message)
         if result.status != "delivered":
             state.mark_failed(request_id, result.error or "command failed")
-            if args.wait:
-                state.release_session_lock(session_key, request_id)
+            state.release_session_lock(session_key, request_id)
             print("Error: %s" % (result.error or "command failed"))
             return 1
         state.mark_delivered(request_id, result.executed_at)
@@ -280,8 +384,7 @@ def cmd_send(args):
         receipt = provider.deliver(envelope)
         if receipt.status != "delivered":
             state.mark_failed(request_id, receipt.error or "delivery failed")
-            if args.wait:
-                state.release_session_lock(session_key, request_id)
+            state.release_session_lock(session_key, request_id)
             print("Error: %s" % (receipt.error or "delivery failed"))
             return 1
         state.mark_delivered(request_id, receipt.delivered_at)
@@ -311,6 +414,13 @@ def _format_time(value):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
 
 
+def cmd_on_hook(_args):
+    payload = json.load(sys.stdin)
+    result = handle_hook_event(payload)
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     if not args.command:
@@ -324,6 +434,8 @@ def main(argv=None):
     if args.command == "info":
         cmd_info(args)
         return 0
+    if args.command == "_on_hook":
+        return cmd_on_hook(args)
     return 1
 
 

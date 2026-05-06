@@ -83,6 +83,21 @@ class MatchFrameworkTest(unittest.TestCase):
         self.assertEqual(message["status"], "timeout")
         self.assertTrue(self.store.acquire_session_lock("feishu:s1:u1", "req-2", 1))
 
+    def test_wait_framework_returns_reply_written_by_hook_handler(self):
+        provider = StaticProvider([])
+        self.store.mark_replied("req-1", "hook reply", 12.0)
+
+        reply = wait_for_reply_framework(
+            store=self.store,
+            provider=provider,
+            request_id="req-1",
+            session_key="feishu:s1:u1",
+            timeout_secs=1,
+            poll_interval=0.01,
+        )
+
+        self.assertEqual(reply, "hook reply")
+
 
 if __name__ == "__main__":
     unittest.main()

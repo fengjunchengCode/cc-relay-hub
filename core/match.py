@@ -1,6 +1,13 @@
 import time
 
 
+def find_request_for_session(store, session_key):
+    lock = store.get_active_lock(session_key)
+    if lock:
+        return store.get_message(lock["request_id"])
+    return store.find_latest_open_message_by_session(session_key)
+
+
 def wait_for_reply_framework(store, provider, request_id, session_key, timeout_secs, poll_interval):
     deadline = time.time() + max(float(timeout_secs), 0.0)
     message = store.get_message(request_id)
@@ -10,6 +17,10 @@ def wait_for_reply_framework(store, provider, request_id, session_key, timeout_s
 
     try:
         while time.time() < deadline:
+            message = store.get_message(request_id)
+            if message and message.get("status") == "replied":
+                return message.get("reply_body")
+
             events = provider.poll_events(cursor=str(delivered_at))
             for event in events:
                 store.append_event(

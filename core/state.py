@@ -27,10 +27,14 @@ class StateStore(object):
                         body TEXT NOT NULL,
                         status TEXT NOT NULL,
                         error TEXT,
+                        origin_project TEXT,
+                        origin_session_key TEXT,
                         created_at REAL NOT NULL,
                         delivered_at REAL,
                         replied_at REAL,
-                        reply_body TEXT
+                        reply_body TEXT,
+                        notified_at REAL,
+                        notify_error TEXT
                     )
                     """
                 )
@@ -57,20 +61,63 @@ class StateStore(object):
                     )
                     """
                 )
+                self._ensure_message_columns(conn)
         finally:
             conn.close()
 
-    def insert_message(self, request_id, sender, target, session_key, provider, body, status, created_at):
+    def _ensure_message_columns(self, conn):
+        columns = set()
+        for row in conn.execute("PRAGMA table_info(messages)").fetchall():
+            columns.add(row["name"])
+
+        additions = {
+            "origin_project": "TEXT",
+            "origin_session_key": "TEXT",
+            "notified_at": "REAL",
+            "notify_error": "TEXT",
+        }
+        for name, column_type in additions.items():
+            if name in columns:
+                continue
+            conn.execute(
+                "ALTER TABLE messages ADD COLUMN %s %s" % (name, column_type)
+            )
+
+    def insert_message(
+        self,
+        request_id,
+        sender,
+        target,
+        session_key,
+        provider,
+        body,
+        status,
+        created_at,
+        origin_project=None,
+        origin_session_key=None,
+    ):
         conn = self._connect()
         try:
             with conn:
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO messages (
-                        request_id, sender, target, session_key, provider, body, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        request_id, sender, target, session_key, provider, body, status,
+                        origin_project, origin_session_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (request_id, sender, target, session_key, provider, body, status, created_at),
+                    (
+                        request_id,
+                        sender,
+                        target,
+                        session_key,
+                        provider,
+                        body,
+                        status,
+                        origin_project,
+                        origin_session_key,
+                        created_at,
+                    ),
                 )
         finally:
             conn.close()
@@ -101,6 +148,20 @@ class StateStore(object):
             request_id,
             "UPDATE messages SET status = ?, error = ? WHERE request_id = ?",
             ("failed", error, request_id),
+        )
+
+    def mark_notified(self, request_id, notified_at):
+        self._update_message(
+            request_id,
+            "UPDATE messages SET notified_at = ?, notify_error = NULL WHERE request_id = ?",
+            (notified_at, request_id),
+        )
+
+    def mark_notify_failed(self, request_id, error):
+        self._update_message(
+            request_id,
+            "UPDATE messages SET notify_error = ? WHERE request_id = ?",
+            (error, request_id),
         )
 
     def _update_message(self, request_id, sql, params):
@@ -148,6 +209,22 @@ class StateStore(object):
         finally:
             conn.close()
 
+    def find_latest_open_message_by_session(self, session_key):
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_key = ? AND status IN ('pending', 'delivered')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (session_key,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
     def acquire_session_lock(self, session_key, request_id, ttl_secs):
         now = time.time()
         expires_at = now + max(float(ttl_secs), 0.0)
@@ -174,6 +251,9 @@ class StateStore(object):
             conn.close()
 
     def has_active_lock(self, session_key):
+        return self.get_active_lock(session_key) is not None
+
+    def get_active_lock(self, session_key):
         now = time.time()
         conn = self._connect()
         try:
@@ -183,10 +263,10 @@ class StateStore(object):
                     (now,),
                 )
                 row = conn.execute(
-                    "SELECT 1 FROM session_locks WHERE session_key = ?",
+                    "SELECT * FROM session_locks WHERE session_key = ?",
                     (session_key,),
                 ).fetchone()
-                return row is not None
+                return dict(row) if row else None
         finally:
             conn.close()
 
