@@ -6,7 +6,9 @@ import subprocess
 import sys
 import time
 import uuid
-from datetime import datetime
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -47,6 +49,12 @@ def parse_args(argv):
     info_parser.add_argument("agent")
 
     subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
+
+    watch_parser = subparsers.add_parser("watch", help="Long-poll for hook events (no shell loop needed)")
+    watch_parser.add_argument("--since", default=None, help="ISO-8601 timestamp; only return events after this time")
+    watch_parser.add_argument("--timeout", type=int, default=30, help="Per-request timeout in seconds (default: 30)")
+    watch_parser.add_argument("--loop", action="store_true", help="Continuously poll until Ctrl-C (default: one-shot)")
+    watch_parser.add_argument("--format", choices=["json", "text"], default="json")
 
     return parser.parse_args(argv)
 
@@ -262,8 +270,6 @@ def notify_origin_reply(message, reply_text, bindings=None, runner=None):
     notify = _send_via_origin_config(origin_project, origin_session, binding, content, runner)
     if notify["status"] == "sent":
         return notify
-    if notify.get("reason") != "config_missing":
-        return notify
     return _send_via_origin_webhook(origin_project, origin_session, binding, content)
 
 
@@ -473,6 +479,70 @@ def cmd_on_hook(_args):
     return 0
 
 
+def cmd_watch(args):
+    """Long-poll the hook server for new events.
+
+    Default mode: one-shot. Makes a single HTTP request that blocks until
+    events arrive (or timeout), prints them, exits.
+
+    --loop mode: continuously long-polls. Each iteration blocks until new
+    events arrive, prints them, then immediately long-polls again. Still
+    uses a single process -- no shell while-loop needed.
+    """
+    hook_host = "127.0.0.1"
+    hook_port = 9120
+    since = args.since or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    timeout_sec = max(1, min(args.timeout, 60))
+    loop = args.loop
+    fmt = args.format
+
+    def fetch(since_value):
+        url = "http://%s:%d/events/longpoll?since=%s&timeout=%d" % (
+            hook_host, hook_port,
+            urllib.request.quote(since_value, safe=""),
+            timeout_sec,
+        )
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=timeout_sec + 5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            print(json.dumps({"error": str(exc.reason)}), file=sys.stderr)
+            return None
+        except Exception as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return None
+
+    while True:
+        data = fetch(since)
+        if data is None:
+            if not loop:
+                return 1
+            time.sleep(2)
+            continue
+
+        events = data.get("events", [])
+        if events:
+            latest_ts = max(e.get("received_at", "") for e in events)
+            if latest_ts:
+                since = latest_ts
+
+            if fmt == "json":
+                for ev in events:
+                    print(json.dumps(ev, ensure_ascii=False))
+            else:
+                for ev in events:
+                    t = ev.get("hook_event", "?")
+                    proj = ev.get("payload", {}).get("project", "?")
+                    content = ev.get("payload", {}).get("content", "")
+                    ts = ev.get("received_at", "")
+                    print("[%s] %s from %s: %s" % (ts, t, proj, content[:200]))
+            sys.stdout.flush()
+
+        if not loop:
+            return 0
+
+
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     if not args.command:
@@ -488,6 +558,8 @@ def main(argv=None):
         return 0
     if args.command == "_on_hook":
         return cmd_on_hook(args)
+    if args.command == "watch":
+        return cmd_watch(args)
     return 1
 
 

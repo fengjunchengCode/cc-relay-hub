@@ -18,6 +18,8 @@ cc-relay-hub list
 cc-relay-hub info <agent>
 cc-relay-hub send <agent> "<message>"
 cc-relay-hub send <agent> "<message>" --wait --timeout 300
+cc-relay-hub watch                     # one-shot long-poll for new events
+cc-relay-hub watch --loop              # continuous long-poll (no shell loop)
 ```
 
 `registry.json` and `bindings.json` are auto-generated on the first `list` or `info` run. There is no `bootstrap` command.
@@ -301,6 +303,62 @@ cp ~/.cc-connect/cc-relay-hub/skills/cc-relay.md ~/.claude/skills/
 ```
 
 For other agents, load the same file into their local instruction/skill mechanism. The file does not hardcode peer names; it always discovers current agents with `cc-relay-hub list --format json`.
+
+## Monitoring hook events (no shell loops)
+
+**Do not use `tail -f`, `while true`, or any shell polling loop to monitor
+`hook-events.jsonl`.** Shell polling loops block the calling agent's
+conversation, preventing it from receiving new user messages while the loop
+runs.
+
+The hook server exposes a **long-poll endpoint** that blocks efficiently in a
+single HTTP request:
+
+```
+GET http://127.0.0.1:9120/events/longpoll?since=<ISO timestamp>&timeout=30
+```
+
+- If events exist after `since`, the server returns them immediately.
+- Otherwise, the connection stays open until a new event arrives or `timeout`
+  seconds elapse.
+- The response body is `{"events": [...]}`.
+
+### One-shot: check for new events once
+
+```bash
+cc-relay-hub watch
+```
+
+This makes a single long-poll request (up to 30 seconds by default), prints
+any events, and exits. Safe to call from any tool or agent.
+
+### Continuous: watch events in a loop (single process)
+
+```bash
+cc-relay-hub watch --loop --format text
+```
+
+This runs a single Python process that repeatedly long-polls the hook server.
+Each iteration blocks until events arrive, prints them, then immediately
+long-polls again. There is no shell `while` loop, no polling sleep, and no
+file-system polling.
+
+### Raw curl (for non-Python consumers)
+
+```bash
+# One-shot: block until an event arrives
+curl -s "http://127.0.0.1:9120/events/longpoll?since=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# One-shot with custom timeout (seconds)
+curl -s "http://127.0.0.1:9120/events/longpoll?since=$(date -u +%Y-%m-%dT%H:%M:%SZ)&timeout=10"
+```
+
+### For request/reply flow
+
+Use `cc-relay-hub send <agent> "<message>" --wait` instead. The `--wait` flag
+internally polls the cc-connect session file (no shell loop) and blocks until
+a reply arrives or the timeout expires. This is the recommended pattern for
+request/reply delegation between agents.
 
 ## Troubleshooting
 
