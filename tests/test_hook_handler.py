@@ -58,6 +58,13 @@ class HookHandlerTest(unittest.TestCase):
                 "timestamp": "2026-05-06T10:00:00+08:00",
             },
             state_path=self.db_path,
+            bindings={
+                "cc_connect": {
+                    "codex-bot": {
+                        "config_path": "/tmp/config-codex.toml",
+                    }
+                }
+            },
             runner=runner,
         )
 
@@ -68,6 +75,8 @@ class HookHandlerTest(unittest.TestCase):
             calls[0][0],
             [
                 "cc-connect",
+                "--config",
+                "/tmp/config-codex.toml",
                 "send",
                 "-p",
                 "codex-bot",
@@ -100,6 +109,7 @@ class HookHandlerTest(unittest.TestCase):
                 "timestamp": "2026-05-06T10:00:00+08:00",
             },
             state_path=self.db_path,
+            bindings={"cc_connect": {}},
             runner=runner,
         )
 

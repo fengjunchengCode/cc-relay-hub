@@ -191,15 +191,23 @@ def _run_cc_connect_send(command, input_text):
     )
 
 
-def notify_origin_reply(message, reply_text, runner=None):
-    origin_project = message.get("origin_project")
-    origin_session = message.get("origin_session_key")
-    if not origin_project or not origin_session:
-        return {"status": "skipped", "reason": "origin_missing"}
+def load_bindings(bindings=None):
+    if bindings is not None:
+        return bindings
+    if not BINDINGS_PATH.exists():
+        return {"cc_connect": {}, "cdp": {}}
+    return load_json(BINDINGS_PATH)
 
-    content = _build_notification_content(message, reply_text)
+
+def _send_via_origin_config(origin_project, origin_session, binding, content, runner):
+    config_path = binding.get("config_path")
+    if not config_path:
+        return {"status": "skipped", "reason": "config_missing"}
+
     command = [
         "cc-connect",
+        "--config",
+        config_path,
         "send",
         "-p",
         origin_project,
@@ -207,15 +215,59 @@ def notify_origin_reply(message, reply_text, runner=None):
         origin_session,
         "--stdin",
     ]
-    runner = runner or _run_cc_connect_send
     result = runner(command, content)
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         return {"status": "failed", "error": stderr or "cc-connect send failed"}
-    return {"status": "sent"}
+    return {"status": "sent", "via": "config"}
 
 
-def handle_hook_event(payload, state_path=None, runner=None):
+def _send_via_origin_webhook(origin_project, origin_session, binding, content):
+    webhook_port = int(binding.get("webhook_port", 0) or 0)
+    if not webhook_port:
+        return {"status": "skipped", "reason": "webhook_missing"}
+
+    webhook_binding = dict(binding)
+    webhook_binding["session_key"] = origin_session
+    provider = CCConnectProvider(origin_project, webhook_binding)
+    receipt = provider.deliver(
+        RelayEnvelope(
+            request_id=uuid.uuid4().hex,
+            sender="cc-relay",
+            target=origin_project,
+            body=content,
+            created_at=time.time(),
+            reply_to=None,
+            ttl=30,
+        )
+    )
+    if receipt.status != "delivered":
+        return {"status": "failed", "error": receipt.error or "origin webhook delivery failed"}
+    return {"status": "sent", "via": "webhook"}
+
+
+def notify_origin_reply(message, reply_text, bindings=None, runner=None):
+    origin_project = message.get("origin_project")
+    origin_session = message.get("origin_session_key")
+    if not origin_project or not origin_session:
+        return {"status": "skipped", "reason": "origin_missing"}
+
+    bindings = load_bindings(bindings)
+    binding = bindings.get("cc_connect", {}).get(origin_project)
+    if not binding:
+        return {"status": "failed", "error": "origin binding missing"}
+
+    content = _build_notification_content(message, reply_text)
+    runner = runner or _run_cc_connect_send
+    notify = _send_via_origin_config(origin_project, origin_session, binding, content, runner)
+    if notify["status"] == "sent":
+        return notify
+    if notify.get("reason") != "config_missing":
+        return notify
+    return _send_via_origin_webhook(origin_project, origin_session, binding, content)
+
+
+def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
     store = StateStore(str(state_path or STATE_DB_PATH))
     event_type = payload.get("event") or payload.get("hook_event") or "unknown"
     agent_id = payload.get("project") or payload.get("agent_id") or "unknown"
@@ -250,7 +302,7 @@ def handle_hook_event(payload, state_path=None, runner=None):
     store.mark_replied(message["request_id"], content, timestamp)
     store.release_session_lock(session_key, message["request_id"])
 
-    notify = notify_origin_reply(message, content, runner=runner)
+    notify = notify_origin_reply(message, content, bindings=bindings, runner=runner)
     if notify["status"] == "sent":
         store.mark_notified(message["request_id"], time.time())
     elif notify["status"] == "failed":
