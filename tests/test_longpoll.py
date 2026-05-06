@@ -73,11 +73,13 @@ class LongPollTest(unittest.TestCase):
             return json.loads(resp.read().decode("utf-8"))
 
     def _post_hook(self, project, content, session_key="s1"):
+        # Include relay marker so hook server processes the event
+        relay_content = "[cc-relay reply_to=test-req]\n" + content
         payload = json.dumps({
             "event": "message.sent",
             "project": project,
             "session_key": session_key,
-            "content": content,
+            "content": relay_content,
             "timestamp": "2026-05-06T10:00:00+08:00",
         }).encode()
         req = urllib.request.Request(
@@ -100,7 +102,7 @@ class LongPollTest(unittest.TestCase):
         time.sleep(0.2)
         result = self._longpoll(since="2000-01-01T00:00:00Z", timeout=1)
         contents = [e["payload"]["content"] for e in result["events"]]
-        self.assertIn("hello-1", contents)
+        self.assertTrue(any("hello-1" in c for c in contents))
 
     def test_longpoll_waits_for_new_event(self):
         """Long-poll should block until a new event arrives."""
@@ -136,7 +138,7 @@ class LongPollTest(unittest.TestCase):
         self.assertTrue(len(results) > 0)
         if "error" not in results[0]:
             contents = [e["payload"]["content"] for e in results[0].get("events", [])]
-            self.assertIn("trigger", contents)
+            self.assertTrue(any("trigger" in c for c in contents))
 
     def test_longpoll_since_filters_old_events(self):
         """Events before `since` should not be returned."""

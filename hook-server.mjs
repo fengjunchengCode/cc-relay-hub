@@ -143,6 +143,16 @@ http.createServer((req, res) => {
   req.on("end", () => {
     try {
       const event = JSON.parse(body);
+
+      // Only process relay messages — skip non-relay messages (e.g. user's
+      // direct chat with the agent) to avoid cross-contamination.
+      const content = event.content || "";
+      const isRelayReply = /\[cc-relay reply_to=/.test(content);
+      if (!isRelayReply) {
+        res.statusCode = 204;
+        return res.end();
+      }
+
       const now = new Date();
       const record = {
         received_at: now.toISOString(),
