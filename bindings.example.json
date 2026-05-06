@@ -1,0 +1,12 @@
+{
+  "cc_connect": {
+    "codex-bot": {
+      "config_path": "/path/to/.cc-connect/config-codex.toml",
+      "webhook_host": "127.0.0.1",
+      "webhook_port": 9112,
+      "webhook_path": "/hook",
+      "session_key": "feishu:chat_id:user_id"
+    }
+  },
+  "cdp": {}
+}

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+state.db
+hook-events.jsonl
+token_cache.json
+
+config.json
+registry.json
+bindings.json

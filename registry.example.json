@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "agents": {
+    "codex-bot": {
+      "type": "codex",
+      "provider": "cc_connect",
+      "work_dir": "/path/to/workdir",
+      "capabilities": [
+        "message.send",
+        "history.read",
+        "session.control"
+      ],
+      "labels": []
+    }
+  }
+}
