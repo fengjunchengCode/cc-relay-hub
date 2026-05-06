@@ -2,4 +2,17 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 "$SCRIPT_DIR/../hub.py" "$@"
+
+# Prefer python3 (macOS/Linux), fall back to python (Windows)
+# Skip Windows Store stubs that lack standard library modules
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomli" 2>/dev/null; then
+    exec python3 "$SCRIPT_DIR/../hub.py" "$@"
+  fi
+fi
+if command -v python >/dev/null 2>&1; then
+  exec python "$SCRIPT_DIR/../hub.py" "$@"
+fi
+
+echo "Error: python 3.9+ is required but not found" >&2
+exit 1

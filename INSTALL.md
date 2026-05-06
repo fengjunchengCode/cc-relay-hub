@@ -83,7 +83,59 @@ for p in found:
 
 After setup, rerun this Step 0.5 check to confirm config files exist.
 
-**If config files are found**, continue to Step 1.
+**If config files are found**, continue to Step 0.6.
+
+---
+
+### Step 0.6: Validate work_dir in each config
+
+cc-connect's default config may contain `work_dir = "/path/to/your/project"` — a placeholder that prevents the agent from starting. Check and fix automatically:
+
+```bash
+python3 <<'PY'
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+import sys
+from pathlib import Path
+
+home = Path.home()
+config_paths = [
+    home / ".cc-connect" / "config.toml",
+    home / ".cc-connect" / "config-codex.toml",
+    Path("/opt/homebrew/etc/cc-connect/config.toml"),
+]
+extras = sorted((home / ".cc-connect").glob("config*.toml")) if (home / ".cc-connect").exists() else []
+for p in extras:
+    if p not in config_paths:
+        config_paths.append(p)
+
+needs_fix = []
+for path in config_paths:
+    if not path.exists():
+        continue
+    with path.open("rb") as f:
+        cfg = tomllib.load(f)
+    for proj in cfg.get("projects", []):
+        name = proj.get("name", "unknown")
+        wd = proj.get("agent", {}).get("options", {}).get("work_dir", "")
+        if not wd or not Path(wd).exists() or "path/to" in wd:
+            needs_fix.append((path, name, wd))
+
+if needs_fix:
+    print("Invalid work_dir found:")
+    for path, name, wd in needs_fix:
+        print(f"  {path} project={name} work_dir={wd}")
+    print(f"\nFix: replace work_dir with your actual project directory in each config file.")
+    print(f"  Example: work_dir = \"{home}\"")
+    sys.exit(1)
+else:
+    print("All work_dir paths are valid.")
+PY
+```
+
+If this check fails, fix the `work_dir` in each reported config file, then rerun.
 
 ---
 
@@ -301,11 +353,11 @@ This scans all cc-connect configs, generates `registry.json` / `bindings.json`, 
 
 Expected: all agents show `up` status. If an agent shows `down`, check that its cc-connect process is running.
 
-If any agent shows `Session: missing`, send one normal message to that bot in its own chat window, then rerun:
-
-```bash
-cc-relay-hub bootstrap
-```
+> **Important**: cc-connect creates session files on demand. If any agent shows `Session: missing`, you MUST send one normal message to that bot via its chat platform (Feishu/Telegram/etc.) first. For example, open Feishu and send "hi" to the bot. Then rerun:
+>
+> ```bash
+> cc-relay-hub bootstrap
+> ```
 
 ---
 

@@ -91,7 +91,7 @@ def session_keys_by_agent():
     sessions_dir = DATA_DIR / "sessions"
     if not sessions_dir.exists():
         return session_map
-    for session_file in sessions_dir.glob("*.json"):
+    for session_file in sorted(sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         stem = session_file.stem
         if "_" not in stem:
             continue
@@ -449,6 +449,7 @@ def cmd_bootstrap(args):
     ))
 
     all_ok = True
+    session_missing = []
     for agent_name in sorted(agents):
         agent = get_agent(registry, bindings, agent_name)
         provider = get_provider(agent)
@@ -467,8 +468,15 @@ def cmd_bootstrap(args):
         ))
         if not webhook_ok:
             all_ok = False
+        if not session_ok:
+            session_missing.append(agent_name)
 
     print()
+    if session_missing:
+        print("Session missing for: %s" % ", ".join(session_missing))
+        print("  → Send a message to each bot via its chat platform (Feishu/Telegram/etc.),")
+        print("    then rerun: cc-relay-hub bootstrap")
+        print()
     if all_ok:
         print("All agents reachable.")
         return 0
