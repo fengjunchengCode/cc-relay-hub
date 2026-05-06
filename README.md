@@ -1,6 +1,6 @@
 # cc-relay-hub
 
-<p align="center">Route messages between any local AI agents. From any chat app.</p>
+<p align="center">A local dispatch layer for AI agents already connected by cc-connect.</p>
 
 <p align="center">
   <a href="https://github.com/fengjunchengCode/cc-relay-hub/blob/main/README_zh.md">中文</a> · English
@@ -8,64 +8,110 @@
 
 ---
 
-## What is cc-relay-hub?
+## What it is
 
-**cc-relay-hub** is a lightweight message relay built on top of [cc-connect](https://github.com/chenhg5/cc-connect). It lets any AI agent (Claude Code, Codex, Gemini CLI, etc.) discover and send messages to any other agent through a unified CLI.
+[cc-connect](https://github.com/chenhg5/cc-connect) brings local coding agents into your chat apps. **cc-relay-hub** adds the missing layer between those agents: discovery, routing, request/reply tracking, and reply forwarding.
 
-**Use case**: delegate tasks from one agent to another. For example, have Claude Code plan an architecture, then send the spec to Codex for implementation — all from your chat window.
+Use it when one agent should hand work to another without asking you to copy messages between chat windows.
 
-> **Single host only.** cc-relay-hub runs on one machine. It reads local cc-connect config files, uses local webhook endpoints, and the hook server binds to `127.0.0.1`. It is not a multi-machine message bus.
+Example:
+
+```text
+Claude Code: plan the migration
+cc-relay-hub: send the implementation brief to Codex
+Codex: build and report back
+cc-relay-hub: forward the reply to Claude Code's original chat session
+```
+
+This is not a replacement for cc-connect. It is a small local coordination layer that uses cc-connect's webhook and hook system as the transport.
+
+> Single host only. cc-relay-hub reads local cc-connect config files, talks to local webhook endpoints, and runs its hook server on `127.0.0.1`.
+
+## Why not just use cc-connect multi-agent chat?
+
+cc-connect already supports multiple agents and multi-bot relay in chat groups. That is great for human-driven collaboration: you mention or message the bot you want, and the conversation happens in the chat app.
+
+cc-relay-hub is different. It is built for **agent-driven orchestration**.
+
+| Capability | cc-connect multi-agent flow | cc-relay-hub |
+| --- | --- | --- |
+| Main job | Connect humans to local agents through chat platforms | Let local agents discover and delegate to each other |
+| Entry point | Chat app commands and group messages | CLI/skill calls from inside an agent |
+| Target selection | Human chooses or mentions a bot | Agent discovers peers with `cc-relay-hub list` |
+| Request tracking | Chat history oriented | SQLite state, request IDs, session locks, reply attribution |
+| Reply path | Reply appears in the chat platform conversation | Reply is forwarded back to the originating agent session |
+| Waiting model | Human watches the chat | `send --wait` and long-poll `watch`, safe for agent tools |
+
+The practical benefit is that an agent can run a controlled handoff:
+
+- discover current peers instead of relying on hardcoded bot names
+- check webhook and session health before sending work
+- send a bounded task to one target session at a time
+- wait for a reply without shell polling loops
+- receive the reply in the original chat context
+
+That makes it better suited for planner-builder, reviewer-implementer, or specialist-agent workflows where the initiating agent needs a concrete answer back before continuing.
 
 ## How it works
 
-```
-Chat App ──► cc-connect (Agent A) ──► cc-relay-hub send ──► cc-connect (Agent B)
-                  ▲                                              │
-                  │         hook: message.sent                   │
-                  └──────────────────────────────────────────────┘
+```text
+Chat App
+   |
+   v
+cc-connect project A  -- cc-relay-hub send -->  cc-connect project B
+   ^                                                |
+   |                                                v
+   +------- hook server receives message.sent <-----+
+            and forwards reply to project A
 ```
 
-1. Agent A sends a message to Agent B via webhook
-2. Agent B replies; cc-connect fires a `message.sent` hook
-3. The hook server receives the event and pushes the reply back through Agent A's own cc-connect instance
+1. Agent A calls `cc-relay-hub send <agent> "<task>"`
+2. cc-relay-hub discovers Agent B from local cc-connect config and session files
+3. The task is delivered through Agent B's local cc-connect webhook
+4. Agent B replies; cc-connect emits a `message.sent` hook
+5. cc-relay-hub matches the reply to the original request and sends it back to Agent A's session
 
 ## Quick Start
 
-### Prerequisites
+### Install and configure via AI agent
 
-- [cc-connect](https://github.com/chenhg5/cc-connect) installed and configured
-- Python 3.9+
-- Node.js (for the hook server)
-- At least two cc-connect projects configured
+The recommended path is to let Claude Code, Codex, Gemini CLI, Cursor Agent, or another local coding agent run the setup for you.
 
-### Install
+Send this prompt to your agent:
+
+```text
+Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/heads/main/INSTALL.md to install and configure cc-relay-hub.
+
+Do not ask me to edit config files by hand. Check prerequisites, install the CLI wrapper, enable the required cc-connect webhooks and message.sent hooks, restart services when needed, start the hook server, verify cc-relay-hub list, and run an end-to-end send test.
+Ask me only for values you cannot safely infer, such as which cc-connect projects should participate.
+```
+
+The install guide is written for agents: it contains checks, exact commands, validation steps, and troubleshooting branches. In normal use, the user should not need to touch TOML manually.
+
+### Manual fallback
+
+Use this only if you want to inspect or run the setup yourself.
 
 ```bash
-# Clone
 git clone https://github.com/fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
 
-# Add CLI to PATH (bash users: replace .zshrc with .bashrc)
 mkdir -p ~/bin
 ln -sf ~/.cc-connect/cc-relay-hub/bin/cc-relay-hub ~/bin/cc-relay-hub
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+case ":$PATH:" in
+  *":$HOME/bin:"*) ;;
+  *) echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc; export PATH="$HOME/bin:$PATH" ;;
+esac
+hash -r
 ```
 
-### Configure
-
-**1. Enable webhook on ALL participating projects** (caller and target):
+Every participating cc-connect config needs:
 
 ```toml
-# In each project's cc-connect config
 [webhook]
 enabled = true
-port = 9110    # use a unique port per project
+port = 9110
 path = "/hook"
-```
 
-**2. Add the reply hook** to each target project's config:
-
-```toml
 [[hooks]]
 event = "message.sent"
 type = "http"
@@ -74,72 +120,80 @@ async = false
 timeout = 2
 ```
 
-**3. Restart cc-connect** after config changes.
-
-**4. Bootstrap sessions**: open each bot's chat window and send one normal message. This creates the initial session that `cc-relay-hub list` needs to discover.
-
-**5. Start the hook server**:
+Use a unique webhook port for each running cc-connect process, then restart cc-connect and start the relay hook server:
 
 ```bash
 node ~/.cc-connect/cc-relay-hub/hook-server.mjs
 ```
 
-For auto-start on macOS, see [INSTALL.md](INSTALL.md).
-
-### Verify
+## Verify
 
 ```bash
-# Discover agents (Session should not be "none")
 cc-relay-hub list
-
-# Send a message
-cc-relay-hub send codex-bot "Hello from Claude Code"
-
-# Send and wait for reply
-cc-relay-hub send codex-bot "Review this code" --wait --timeout 120
+cc-relay-hub info <agent>
+cc-relay-hub send <agent> "Ping from another agent" --wait --timeout 120
 ```
 
-## CLI Reference
+`Session` should not be `none`. If it is, open that bot's own chat window, send one normal message, then run `cc-relay-hub list` again.
+
+## CLI
 
 | Command | Description |
-|---------|-------------|
-| `cc-relay-hub list` | Discover all configured agents |
-| `cc-relay-hub info <agent>` | Show agent details, webhook health, session status |
-| `cc-relay-hub send <agent> "<msg>"` | Send a message to an agent |
-| `cc-relay-hub send <agent> "<msg>" --wait` | Send and block until reply arrives |
-| `cc-relay-hub watch` | One-shot long-poll for new hook events (safe for agents) |
-| `cc-relay-hub watch --loop` | Continuous event streaming (best for human terminals / tmux) |
+| --- | --- |
+| `cc-relay-hub list` | Discover configured local agents |
+| `cc-relay-hub list --format json` | Return machine-readable peer data for agent skills |
+| `cc-relay-hub info <agent>` | Show webhook, session, and health details |
+| `cc-relay-hub send <agent> "<msg>"` | Send a message to a peer agent |
+| `cc-relay-hub send <agent> "<msg>" --wait` | Send and wait for the matched reply |
+| `cc-relay-hub watch` | One-shot long-poll for new hook events |
+| `cc-relay-hub watch --loop` | Continuous event stream for a human terminal or tmux pane |
+
+## Agent skill
+
+The repo ships a generic relay skill:
+
+```text
+skills/cc-relay.md
+```
+
+For Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills
+cp ~/.cc-connect/cc-relay-hub/skills/cc-relay.md ~/.claude/skills/
+```
+
+For other agents, load the same file into their project instruction or skill system. The skill discovers peers at runtime with `cc-relay-hub list --format json`; it does not hardcode names.
 
 ## Architecture
 
-```
+```text
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │   CLI/Skill  │────►│  Relay Core  │────►│   Provider   │
-│              │◄────│  (envelope,  │◄────│  (cc-connect │
-│              │     │   state.db)  │     │   webhook)   │
+│              │◄────│  state.db    │◄────│ cc-connect   │
 └──────────────┘     └──────────────┘     └──────────────┘
                            │
                      ┌─────┴─────┐
                      │ Hook Server│ :9120
-                     │ (Node.js)  │
                      └───────────┘
 ```
 
-- **Registry/Discovery**: reads cc-connect config files to find agents
-- **Transport**: delivers messages via cc-connect webhook endpoints
-- **State**: SQLite store tracks message lifecycle and reply attribution
-- **Hook Server**: receives `message.sent` events, pushes replies back through the origin project's own cc-connect path
+- **Discovery** reads local `~/.cc-connect/config*.toml` files and session metadata
+- **Provider** sends through cc-connect local webhooks
+- **State** stores request IDs, session locks, delivery status, replies, and notification status
+- **Hook server** receives `message.sent` events and forwards matched replies to the origin session
 
-## Important Notes
+## Operational notes
 
-- **Every participating project** must have `[webhook]` enabled — including the origin (caller) project
-- **Bootstrap each bot** by sending one normal message in its chat window before using `cc-relay-hub`
-- **Never use shell polling loops** (`tail -f`, `while true`) to monitor events — use `cc-relay-hub watch` (one-shot, safe for agents) or `cc-relay-hub send --wait` (request/reply)
+- Enable `[webhook]` for both the origin project and the target project
+- Add the `message.sent` hook to projects that should return replies through the relay
+- Bootstrap each bot once by sending a normal message in its own chat window
+- Do not use `tail -f`, `while true`, or shell polling loops for events; use `send --wait` or `watch`
 - The hook server listens on `127.0.0.1:9120` by default
 
-## Detailed Installation
+## Full installation guide
 
-See [INSTALL.md](INSTALL.md) for a step-by-step guide (designed for AI agents to follow automatically).
+See [INSTALL.md](INSTALL.md). It is intentionally written so an AI coding agent can execute the setup and verify each step.
 
 ## License
 

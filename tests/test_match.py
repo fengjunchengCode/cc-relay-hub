@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.envelope import RelayEvent  # noqa: E402
-from core.match import wait_for_reply_framework  # noqa: E402
+from core.match import extract_relay_reply, wait_for_reply_framework  # noqa: E402
 from core.state import StateStore  # noqa: E402
 
 
@@ -47,7 +47,7 @@ class MatchFrameworkTest(unittest.TestCase):
                 event_type="message.reply",
                 request_id=None,
                 agent_id="codex-bot",
-                content="pong",
+                content="[cc-relay reply_to=req-1]\npong",
                 timestamp=12.0,
             )
         ])
@@ -65,6 +65,38 @@ class MatchFrameworkTest(unittest.TestCase):
         message = self.store.get_message("req-1")
         self.assertEqual(message["status"], "replied")
         self.assertEqual(message["reply_body"], "pong")
+
+    def test_wait_framework_ignores_unmarked_reply_events(self):
+        provider = StaticProvider([
+            RelayEvent(
+                event_type="message.reply",
+                request_id=None,
+                agent_id="codex-bot",
+                content="direct user reply",
+                timestamp=12.0,
+            )
+        ])
+
+        reply = wait_for_reply_framework(
+            store=self.store,
+            provider=provider,
+            request_id="req-1",
+            session_key="feishu:s1:u1",
+            timeout_secs=0.05,
+            poll_interval=0.01,
+        )
+
+        self.assertIsNone(reply)
+        message = self.store.get_message("req-1")
+        self.assertEqual(message["status"], "timeout")
+
+    def test_extract_relay_reply_requires_matching_marker_at_start(self):
+        self.assertEqual(
+            extract_relay_reply("[cc-relay reply_to=req-1]\nanswer", "req-1"),
+            "answer",
+        )
+        self.assertIsNone(extract_relay_reply("answer", "req-1"))
+        self.assertIsNone(extract_relay_reply("[cc-relay reply_to=req-2]\nanswer", "req-1"))
 
     def test_wait_framework_times_out_and_releases_lock(self):
         provider = StaticProvider([])

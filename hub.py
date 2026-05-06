@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 from core.envelope import RelayEnvelope
-from core.match import find_request_for_session, wait_for_reply_framework
+from core.match import parse_relay_reply, wait_for_reply_framework
 from core.state import StateStore
 from providers.cc_connect import CCConnectProvider
 
@@ -301,8 +301,6 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
     session_key = payload.get("session_key") or ""
     content = payload.get("content") or ""
     timestamp = _parse_event_timestamp(payload.get("timestamp"))
-    message = None
-
     if event_type != "message.sent" or not session_key:
         store.append_event(
             event_type=event_type,
@@ -314,22 +312,48 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
         )
         return {"status": "ignored", "reason": "unsupported_event"}
 
-    message = find_request_for_session(store, session_key)
+    relay_reply = parse_relay_reply(content)
+    if not relay_reply:
+        store.append_event(
+            event_type=event_type,
+            agent_id=agent_id,
+            request_id=None,
+            session_key=session_key,
+            content=content,
+            timestamp=timestamp,
+        )
+        return {"status": "unmatched", "reason": "missing_relay_marker", "session_key": session_key}
+
+    message = store.get_message(relay_reply["request_id"])
+    if (
+        not message
+        or message.get("session_key") != session_key
+        or message.get("target") != agent_id
+        or message.get("status") not in ("pending", "delivered")
+    ):
+        store.append_event(
+            event_type=event_type,
+            agent_id=agent_id,
+            request_id=relay_reply["request_id"],
+            session_key=session_key,
+            content=relay_reply["content"],
+            timestamp=timestamp,
+        )
+        return {"status": "unmatched", "request_id": relay_reply["request_id"], "session_key": session_key}
+
     store.append_event(
         event_type=event_type,
         agent_id=agent_id,
-        request_id=message["request_id"] if message else None,
+        request_id=message["request_id"],
         session_key=session_key,
-        content=content,
+        content=relay_reply["content"],
         timestamp=timestamp,
     )
-    if not message:
-        return {"status": "unmatched", "session_key": session_key}
 
-    store.mark_replied(message["request_id"], content, timestamp)
+    store.mark_replied(message["request_id"], relay_reply["content"], timestamp)
     store.release_session_lock(session_key, message["request_id"])
 
-    notify = notify_origin_reply(message, content, bindings=bindings, runner=runner)
+    notify = notify_origin_reply(message, relay_reply["content"], bindings=bindings, runner=runner)
     if notify["status"] == "sent":
         store.mark_notified(message["request_id"], time.time())
     elif notify["status"] == "failed":

@@ -1,4 +1,26 @@
 import time
+import re
+
+
+_REPLY_MARKER_RE = re.compile(r"^\s*\[cc-relay\s+reply_to=([A-Za-z0-9_.:-]+)\]\s*")
+
+
+def parse_relay_reply(content):
+    match = _REPLY_MARKER_RE.match(content or "")
+    if not match:
+        return None
+    reply = content[match.end():].lstrip("\r\n")
+    return {
+        "request_id": match.group(1),
+        "content": reply,
+    }
+
+
+def extract_relay_reply(content, request_id):
+    parsed = parse_relay_reply(content)
+    if not parsed or parsed["request_id"] != request_id:
+        return None
+    return parsed["content"]
 
 
 def find_request_for_session(store, session_key):
@@ -23,17 +45,18 @@ def wait_for_reply_framework(store, provider, request_id, session_key, timeout_s
 
             events = provider.poll_events(cursor=str(delivered_at))
             for event in events:
+                reply = extract_relay_reply(event.content, request_id)
                 store.append_event(
                     event_type=event.event_type,
                     agent_id=event.agent_id,
-                    request_id=request_id,
+                    request_id=request_id if reply is not None else None,
                     session_key=session_key,
-                    content=event.content,
+                    content=reply if reply is not None else event.content,
                     timestamp=event.timestamp,
                 )
-                if event.event_type == "message.reply":
-                    store.mark_replied(request_id, event.content, event.timestamp)
-                    return event.content
+                if event.event_type == "message.reply" and reply is not None:
+                    store.mark_replied(request_id, reply, event.timestamp)
+                    return reply
             time.sleep(max(float(poll_interval), 0.01))
         store.mark_timeout(request_id, time.time())
         return None

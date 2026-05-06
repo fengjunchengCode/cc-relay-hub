@@ -54,7 +54,7 @@ class HookHandlerTest(unittest.TestCase):
                 "event": "message.sent",
                 "project": "claude-bot",
                 "session_key": "feishu:target:u1",
-                "content": "pong",
+                "content": "[cc-relay reply_to=req-1]\npong",
                 "timestamp": "2026-05-06T10:00:00+08:00",
             },
             state_path=self.db_path,
@@ -86,12 +86,54 @@ class HookHandlerTest(unittest.TestCase):
             ],
         )
         self.assertIn("pong", calls[0][1])
+        self.assertNotIn("[cc-relay reply_to=req-1]", calls[0][1])
 
         message = self.store.get_message("req-1")
         self.assertEqual(message["status"], "replied")
         self.assertEqual(message["reply_body"], "pong")
         self.assertIsNotNone(message["notified_at"])
         self.assertFalse(self.store.has_active_lock("feishu:target:u1"))
+
+    def test_handle_hook_event_without_relay_marker_does_not_match_pending_lock(self):
+        self.store.insert_message(
+            request_id="req-1",
+            sender="hub",
+            target="claude-bot",
+            session_key="feishu:target:u1",
+            provider="cc_connect",
+            body="ping",
+            status="pending",
+            created_at=10.0,
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+        )
+        self.store.mark_delivered("req-1", 11.0)
+        self.store.acquire_session_lock("feishu:target:u1", "req-1", 30)
+
+        calls = []
+
+        def runner(command, input_text):
+            calls.append((command, input_text))
+            return CompletedProcessStub()
+
+        result = hub.handle_hook_event(
+            {
+                "event": "message.sent",
+                "project": "claude-bot",
+                "session_key": "feishu:target:u1",
+                "content": "direct user reply",
+                "timestamp": "2026-05-06T10:00:00+08:00",
+            },
+            state_path=self.db_path,
+            bindings={"cc_connect": {}},
+            runner=runner,
+        )
+
+        self.assertEqual(result["status"], "unmatched")
+        self.assertEqual(calls, [])
+        message = self.store.get_message("req-1")
+        self.assertEqual(message["status"], "delivered")
+        self.assertTrue(self.store.has_active_lock("feishu:target:u1"))
 
     def test_handle_hook_event_without_match_does_not_notify(self):
         calls = []

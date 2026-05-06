@@ -16,6 +16,19 @@ from core.envelope import CommandResult, DeliveryReceipt, ProviderHealth, RelayE
 from providers.base import ControlProvider, MessageProvider
 
 
+def build_relay_prompt(envelope):
+    return "\n".join([
+        "[cc-relay request_id=%s]" % envelope.request_id,
+        "",
+        envelope.body,
+        "",
+        "Relay protocol:",
+        "When you answer this request, start your final response with exactly this line:",
+        "[cc-relay reply_to=%s]" % envelope.request_id,
+        "Then put your answer after that marker. Do not use this marker for any other conversation.",
+    ])
+
+
 class CCConnectProvider(MessageProvider, ControlProvider):
     def __init__(self, agent_id, binding):
         self.agent_id = agent_id
@@ -25,7 +38,7 @@ class CCConnectProvider(MessageProvider, ControlProvider):
         delivered_at = time.time()
         payload = {
             "session_key": self.binding["session_key"],
-            "prompt": envelope.body,
+            "prompt": build_relay_prompt(envelope),
             "event": "cc-relay",
         }
         data = json.dumps(payload).encode("utf-8")

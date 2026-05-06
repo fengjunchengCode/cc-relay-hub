@@ -66,11 +66,12 @@ class CCConnectProviderTest(unittest.TestCase):
                 receipt = provider.deliver(envelope)
 
                 self.assertEqual(receipt.status, "delivered")
-                self.assertEqual(CaptureHandler.payloads[-1], {
-                    "session_key": "feishu:s1:u1",
-                    "prompt": "ping",
-                    "event": "cc-relay",
-                })
+                payload = CaptureHandler.payloads[-1]
+                self.assertEqual(payload["session_key"], "feishu:s1:u1")
+                self.assertEqual(payload["event"], "cc-relay")
+                self.assertIn("ping", payload["prompt"])
+                self.assertIn("[cc-relay request_id=req-1]", payload["prompt"])
+                self.assertIn("[cc-relay reply_to=req-1]", payload["prompt"])
             finally:
                 server.shutdown()
                 thread.join()
