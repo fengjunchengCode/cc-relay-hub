@@ -207,6 +207,19 @@ def load_bindings(bindings=None):
     return load_json(BINDINGS_PATH)
 
 
+_RETRYABLE_PATTERNS = [
+    "already running",
+    "another cc-connect instance",
+    "ECONNREFUSED",
+    "EADDRINUSE",
+]
+
+
+def _is_retryable_error(stderr_text):
+    text = stderr_text.lower()
+    return any(pat.lower() in text for pat in _RETRYABLE_PATTERNS)
+
+
 def _send_via_origin_config(origin_project, origin_session, binding, content, runner):
     config_path = binding.get("config_path")
     if not config_path:
@@ -226,6 +239,8 @@ def _send_via_origin_config(origin_project, origin_session, binding, content, ru
     result = runner(command, content)
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        if _is_retryable_error(stderr):
+            return {"status": "skipped", "reason": "retryable", "error": stderr}
         return {"status": "failed", "error": stderr or "cc-connect send failed"}
     return {"status": "sent", "via": "config"}
 
@@ -270,7 +285,13 @@ def notify_origin_reply(message, reply_text, bindings=None, runner=None):
     notify = _send_via_origin_config(origin_project, origin_session, binding, content, runner)
     if notify["status"] == "sent":
         return notify
-    return _send_via_origin_webhook(origin_project, origin_session, binding, content)
+    if notify["status"] == "failed":
+        return notify
+    # retryable or config_missing → try webhook fallback
+    result = _send_via_origin_webhook(origin_project, origin_session, binding, content)
+    if result["status"] == "skipped":
+        return {"status": "failed", "error": "webhook fallback unavailable: %s" % result.get("reason", "unknown")}
+    return result
 
 
 def handle_hook_event(payload, state_path=None, bindings=None, runner=None):

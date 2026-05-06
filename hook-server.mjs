@@ -4,8 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 const hubDir = path.dirname(new URL(import.meta.url).pathname);
-const out = path.join(hubDir, "hook-events.jsonl");
+const out = process.env.HOOK_EVENTS_FILE || path.join(hubDir, "hook-events.jsonl");
 const hubScript = path.join(hubDir, "hub.py");
+const PORT = parseInt(process.env.HOOK_PORT || "9120", 10);
 
 // ---------------------------------------------------------------------------
 // In-memory event ring buffer + long-poll waiters
@@ -34,7 +35,7 @@ function parseSince(value) {
 }
 
 function handleLongPoll(req, res) {
-  const url = new URL(req.url, "http://127.0.0.1:9120");
+  const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const sinceParam = url.searchParams.get("since") || "";
   const timeoutParam = parseInt(url.searchParams.get("timeout") || "30", 10);
   const timeoutSec = Math.min(Math.max(timeoutParam, 1), 60);
@@ -60,6 +61,9 @@ function handleLongPoll(req, res) {
     waiter.timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      // Remove from pendingWaiters to prevent leak
+      const idx = pendingWaiters.indexOf(waiter);
+      if (idx !== -1) pendingWaiters.splice(idx, 1);
       resolve();   // resolve with timeout (will return empty)
     }, timeoutSec * 1000);
   });
@@ -159,6 +163,6 @@ http.createServer((req, res) => {
       res.end(String(err));
     }
   });
-}).listen(9120, "127.0.0.1", () => {
-  console.log("hook server listening on http://127.0.0.1:9120");
+}).listen(PORT, "127.0.0.1", () => {
+  console.log(`hook server listening on http://127.0.0.1:${PORT}`);
 });

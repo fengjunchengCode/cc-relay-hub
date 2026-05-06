@@ -95,7 +95,9 @@ test -f /opt/homebrew/etc/cc-connect/config.toml && echo /opt/homebrew/etc/cc-co
 
 If nothing is printed, configure `cc-connect` first.
 
-### 6. Target projects must have webhook enabled
+### 6. All projects must have webhook enabled
+
+**Both target and origin (caller) projects need `[webhook]` enabled.** The relay uses webhook delivery to push replies back to the originating chat. Without it, replies from target agents will not be forwarded.
 
 Run:
 
@@ -141,8 +143,16 @@ This cannot be verified until after `cc-relay-hub` is cloned. The check happens 
 
 ## Step 1: Clone the repository
 
+SSH (if you have GitHub SSH keys):
+
 ```bash
 git clone git@github.com:fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
+```
+
+HTTPS (no SSH key needed):
+
+```bash
+git clone https://github.com/fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
 ```
 
 Verify:
