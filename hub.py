@@ -48,6 +48,7 @@ def parse_args(argv):
     info_parser = subparsers.add_parser("info")
     info_parser.add_argument("agent")
 
+    subparsers.add_parser("bootstrap", help="Scan configs, write registry/bindings, verify connectivity")
     subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
 
     watch_parser = subparsers.add_parser("watch", help="Long-poll for hook events (no shell loop needed)")
@@ -432,6 +433,50 @@ def cmd_info(args):
     print("  Details:     %s" % status["details"])
 
 
+def cmd_bootstrap(args):
+    registry, bindings = bootstrap_registry_and_bindings()
+    agents = registry.get("agents", {})
+    if not agents:
+        print("No agents discovered. Check ~/.cc-connect/config*.toml files.")
+        return 1
+
+    print("Discovered %d agent(s). Verifying connectivity...\n" % len(agents))
+    print("  {0:<16} {1:<10} {2:<10} {3:<10} {4}".format(
+        "Agent", "Webhook", "Session", "Hook", "Status"
+    ))
+    print("  {0:<16} {1:<10} {2:<10} {3:<10} {4}".format(
+        "─" * 16, "─" * 10, "─" * 10, "─" * 10, "─" * 12
+    ))
+
+    all_ok = True
+    for agent_name in sorted(agents):
+        agent = get_agent(registry, bindings, agent_name)
+        provider = get_provider(agent)
+        health = provider.get_health()
+        hook_ok = "ok" in health.details and "hook=ok" in health.details
+        session_ok = "session_file=" in health.details and "session_file=missing" not in health.details
+        webhook_ok = health.provider_status == "up"
+
+        webhook_str = "up" if webhook_ok else "down"
+        session_str = "ok" if session_ok else "missing"
+        hook_str = "ok" if hook_ok else "missing"
+        status_str = "%s/%s" % (health.provider_status, health.agent_status)
+
+        print("  {0:<16} {1:<10} {2:<10} {3:<10} {4}".format(
+            agent_name, webhook_str, session_str, hook_str, status_str
+        ))
+        if not webhook_ok:
+            all_ok = False
+
+    print()
+    if all_ok:
+        print("All agents reachable.")
+        return 0
+    else:
+        print("Some agents are unreachable. Check that cc-connect is running.")
+        return 1
+
+
 def cmd_send(args):
     registry, bindings = ensure_registry_and_bindings()
     agent = get_agent(registry, bindings, args.agent)
@@ -596,6 +641,8 @@ def main(argv=None):
     if args.command == "list":
         cmd_list(args)
         return 0
+    if args.command == "bootstrap":
+        return cmd_bootstrap(args)
     if args.command == "send":
         return cmd_send(args)
     if args.command == "info":

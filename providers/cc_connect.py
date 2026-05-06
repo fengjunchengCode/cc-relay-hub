@@ -90,7 +90,9 @@ class CCConnectProvider(MessageProvider, ControlProvider):
         events = []
         sessions = data.get("sessions", {})
         for session in sessions.values():
-            for item in session.get("history", []):
+            if not session:
+                continue
+            for item in (session.get("history") or []):
                 if item.get("role") != "assistant":
                     continue
                 timestamp = _parse_timestamp(item.get("timestamp", ""))
@@ -216,7 +218,9 @@ def _latest_history_timestamp(session_file):
         data = json.load(handle)
     latest = None
     for session in data.get("sessions", {}).values():
-        for item in session.get("history", []):
+        if not session:
+            continue
+        for item in (session.get("history") or []):
             timestamp = _parse_timestamp(item.get("timestamp", ""))
             latest = timestamp if latest is None else max(latest, timestamp)
     return latest

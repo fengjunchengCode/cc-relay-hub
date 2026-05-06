@@ -77,12 +77,9 @@ cc-connect project A  -- cc-relay-hub send -->  cc-connect project B
 
 ```text
 Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/heads/main/INSTALL.md to install and configure cc-relay-hub.
-
-Do not ask me to edit config files by hand. Check prerequisites, install the CLI wrapper, enable the required cc-connect webhooks and message.sent hooks, restart services when needed, start the hook server, verify cc-relay-hub list, and run an end-to-end send test.
-Ask me only for values you cannot safely infer, such as which cc-connect projects should participate.
 ```
 
-`INSTALL.md` 是给 AI Agent 执行的安装清单：检查依赖、安装 CLI、写入必要配置、重启服务、启动 Hook Server、验证发现和端到端发送。正常情况下，用户只需要告诉 Agent 哪些 cc-connect 项目要参与。
+`INSTALL.md` 是给 AI Agent 执行的全自动安装清单：检查依赖、安装 CLI、自动写入 hook 和 webhook 配置、重启服务、启动 Hook Server、运行 bootstrap 验证连通性。全程无需用户手动干预。
 
 ### 手动兜底
 
@@ -136,6 +133,7 @@ cc-relay-hub send <agent> "Ping from another agent" --wait --timeout 120
 
 | 命令 | 说明 |
 | --- | --- |
+| `cc-relay-hub bootstrap` | 扫描配置、生成 registry、验证连通性 |
 | `cc-relay-hub list` | 发现本机已配置 Agent |
 | `cc-relay-hub list --format json` | 给 Agent Skill 使用的机器可读 peer 列表 |
 | `cc-relay-hub info <agent>` | 查看 webhook、session、健康状态 |
@@ -181,6 +179,7 @@ cp ~/.cc-connect/cc-relay-hub/skills/cc-relay.md ~/.claude/skills/
 
 ## 运行注意
 
+- 新增 cc-connect 实例后，运行 `cc-relay-hub bootstrap` 重新扫描并验证连通性
 - 发起方和目标方都要启用 `[webhook]`
 - 需要回传回复的项目要添加 `message.sent` hook
 - 每个 Bot 首次使用前，先在它自己的聊天窗口发送一条普通消息完成 session 初始化

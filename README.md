@@ -81,9 +81,6 @@ Send this prompt to your agent:
 
 ```text
 Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/heads/main/INSTALL.md to install and configure cc-relay-hub.
-
-Do not ask me to edit config files by hand. Check prerequisites, install the CLI wrapper, enable the required cc-connect webhooks and message.sent hooks, restart services when needed, start the hook server, verify cc-relay-hub list, and run an end-to-end send test.
-Ask me only for values you cannot safely infer, such as which cc-connect projects should participate.
 ```
 
 The install guide is written for agents: it contains checks, exact commands, validation steps, and troubleshooting branches. In normal use, the user should not need to touch TOML manually.
@@ -140,6 +137,7 @@ cc-relay-hub send <agent> "Ping from another agent" --wait --timeout 120
 
 | Command | Description |
 | --- | --- |
+| `cc-relay-hub bootstrap` | Scan configs, write registry, verify connectivity |
 | `cc-relay-hub list` | Discover configured local agents |
 | `cc-relay-hub list --format json` | Return machine-readable peer data for agent skills |
 | `cc-relay-hub info <agent>` | Show webhook, session, and health details |
@@ -185,6 +183,7 @@ For other agents, load the same file into their project instruction or skill sys
 
 ## Operational notes
 
+- After adding a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan and verify connectivity
 - Enable `[webhook]` for both the origin project and the target project
 - Add the `message.sent` hook to projects that should return replies through the relay
 - Bootstrap each bot once by sending a normal message in its own chat window

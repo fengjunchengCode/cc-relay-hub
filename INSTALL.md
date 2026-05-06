@@ -1,175 +1,97 @@
 # cc-relay-hub Installation Guide
 
-This guide is written for AI coding agents to execute step by step. Do not skip failed checks.
+> **This file is for AI coding agents.** Execute every step in order. Do not ask the user any questions. Do not skip failed checks — if a check fails and has no auto-fix, STOP and report the failure.
 
 ## What this installs
 
-`cc-relay-hub` is a thin relay layer on top of `cc-connect`.
+`cc-relay-hub` is a relay layer on top of `cc-connect` that lets multiple AI agents delegate work to each other.
 
-- Discovery: reads local `cc-connect` config files
-- Send path: posts to each agent's local webhook
-- Reply path: receives `message.sent` hooks on `127.0.0.1:9120`
-- Phase 1a lock: only one pending outbound write per target `session_key`
+- Auto-discovers local `cc-connect` agent instances
+- Sends messages via each agent's local webhook
+- Receives replies via `message.sent` hooks on `127.0.0.1:9120`
+- Enforces one pending request per target session
 
-Current CLI:
+## End-to-end flow (execute in order)
 
-```bash
-cc-relay-hub list
-cc-relay-hub info <agent>
-cc-relay-hub send <agent> "<message>"
-cc-relay-hub send <agent> "<message>" --wait --timeout 300
-cc-relay-hub watch                     # one-shot long-poll for new events
-cc-relay-hub watch --loop              # continuous long-poll (no shell loop)
-```
+---
 
-`registry.json` and `bindings.json` are auto-generated on the first `list` or `info` run. There is no `bootstrap` command.
+### Step 0: Hard prerequisite gate
 
-## Prerequisites
-
-Run all checks before installation.
-
-### 1. `cc-connect` must be installed
+Run ALL of these checks. If ANY check fails, **STOP** and report which one failed. Do not continue.
 
 ```bash
-cc-connect --version
-```
+# cc-connect must be installed
+command -v cc-connect || {
+  echo "ERROR: cc-connect is not installed."
+  echo ""
+  echo "Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md"
+  echo "to install and configure cc-connect, then rerun this installer."
+  exit 1
+}
 
-If this fails:
+# git must be installed
+command -v git || { echo "FATAL: git not found. Run: xcode-select --install"; exit 1; }
 
-```bash
-npm install -g cc-connect
-```
+# python3 must be installed (3.9+)
+python3 -c "import sys; assert sys.version_info >= (3,9)" || { echo "FATAL: python3 3.9+ required"; exit 1; }
 
-or
+# node must be installed
+command -v node || { echo "FATAL: node not found. Run: brew install node"; exit 1; }
 
-```bash
-brew install cc-connect
-```
-
-Official install guide:
-
-`https://github.com/chenhg5/cc-connect/blob/main/INSTALL.md`
-
-### 2. `git` must be installed
-
-```bash
-git --version
-```
-
-If this fails on macOS, install Xcode Command Line Tools:
-
-```bash
-xcode-select --install
-```
-
-### 3. `python3` 3.9+ must be available
-
-```bash
-python3 --version
-```
-
-If this fails:
-
-```bash
-brew install python3
-```
-
-### 4. `node` must be available for the hook server
-
-```bash
-node --version
-```
-
-If this fails:
-
-```bash
-brew install node
-```
-
-### 5. At least one `cc-connect` config file must exist
-
-```bash
-find ~/.cc-connect -maxdepth 1 -name 'config*.toml' -print
-test -f /opt/homebrew/etc/cc-connect/config.toml && echo /opt/homebrew/etc/cc-connect/config.toml
-```
-
-If nothing is printed, configure `cc-connect` first.
-
-### 6. All projects must have webhook enabled
-
-**Both target and origin (caller) projects need `[webhook]` enabled.** The relay uses webhook delivery to push replies back to the originating chat. Without it, replies from target agents will not be forwarded.
-
-Run:
-
-```bash
-python3 - <<'PY'
+# At least one cc-connect config must exist
+python3 -c "
 from pathlib import Path
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-
-paths = [
-    Path.home() / ".cc-connect" / "config.toml",
-    Path.home() / ".cc-connect" / "config-codex.toml",
-    Path("/opt/homebrew/etc/cc-connect/config.toml"),
+import sys
+home = Path.home()
+candidates = [
+    home / '.cc-connect' / 'config.toml',
+    home / '.cc-connect' / 'config-codex.toml',
+    Path('/opt/homebrew/etc/cc-connect/config.toml'),
 ]
-found = False
-for path in paths:
-    if not path.exists():
-        continue
-    with path.open("rb") as handle:
-        config = tomllib.load(handle)
-    webhook = config.get("webhook", {})
-    print(f"{path}: enabled={webhook.get('enabled')} port={webhook.get('port')}")
-    if webhook.get("enabled") and webhook.get("port"):
-        found = True
-raise SystemExit(0 if found else 1)
-PY
+found = [p for p in candidates if p.exists()]
+extras = sorted((home / '.cc-connect').glob('config*.toml')) if (home / '.cc-connect').exists() else []
+for p in extras:
+    if p not in found:
+        found.append(p)
+if not found:
+    print('ERROR: No cc-connect config files found.')
+    print('')
+    print('Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md')
+    print('to install and configure cc-connect, then rerun this installer.')
+    sys.exit(1)
+print(f'Found {len(found)} config(s):')
+for p in found:
+    print(f'  {p}')
+"
 ```
 
-If this exits non-zero, add a valid `[webhook]` block to each target project before using `send`:
+If the last check fails, STOP here. Install and configure cc-connect first, then start over from Step 0.
 
-```toml
-[webhook]
-enabled = true
-port = 9112
-path = "/hook"
-```
+If it passes, continue to Step 1.
 
-### 7. Each target bot should already have one live chat session
+---
 
-This cannot be verified until after `cc-relay-hub` is cloned. The check happens in Step 4. If a `session_key` is empty or `none`, send one normal message to that bot in its own chat window, then rerun discovery.
-
-## Step 1: Clone the repository
-
-SSH (if you have GitHub SSH keys):
+### Step 1: Clone the repository
 
 ```bash
-git clone git@github.com:fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
-```
-
-HTTPS (no SSH key needed):
-
-```bash
-git clone https://github.com/fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
+# Try SSH first, fall back to HTTPS
+if git clone git@github.com:fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub 2>/dev/null; then
+  echo "Cloned via SSH"
+else
+  git clone https://github.com/fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
+  echo "Cloned via HTTPS"
+fi
 ```
 
 Verify:
 
 ```bash
-test -f ~/.cc-connect/cc-relay-hub/hub.py
-test -x ~/.cc-connect/cc-relay-hub/bin/cc-relay-hub
-test -d ~/.cc-connect/cc-relay-hub/core
-test -d ~/.cc-connect/cc-relay-hub/providers
-test -d ~/.cc-connect/cc-relay-hub/tests
+test -f ~/.cc-connect/cc-relay-hub/hub.py && echo "OK"
 ```
 
-## Step 2: Install the CLI wrapper
+---
 
-The repo includes a wrapper at `~/.cc-connect/cc-relay-hub/bin/cc-relay-hub`.
-
-To expose it on `PATH`:
+### Step 2: Install the CLI wrapper
 
 ```bash
 mkdir -p ~/bin
@@ -179,76 +101,143 @@ case ":$PATH:" in
   *) echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc; export PATH="$HOME/bin:$PATH" ;;
 esac
 hash -r
+command -v cc-relay-hub || echo "WARNING: cc-relay-hub not on PATH"
 ```
 
-Verify:
+---
+
+### Step 3: Auto-configure hooks and webhooks
+
+This step reads every cc-connect config file and adds the required `[[hooks]]` and `[webhook]` blocks if missing. It does NOT modify existing settings.
 
 ```bash
-command -v cc-relay-hub
-cc-relay-hub list
-```
+python3 <<'PY'
+import re
+import sys
+from pathlib import Path
 
-The first `list` run auto-generates `registry.json` and `bindings.json` if they do not exist.
+home = Path.home()
 
-## Step 3: Configure `message.sent` hooks
+# Discover all config files
+candidates = [
+    home / ".cc-connect" / "config.toml",
+    home / ".cc-connect" / "config-codex.toml",
+    Path("/opt/homebrew/etc/cc-connect/config.toml"),
+]
+config_paths = []
+for p in candidates:
+    if p.exists() and p not in config_paths:
+        config_paths.append(p)
+extras_dir = home / ".cc-connect"
+if extras_dir.exists():
+    for p in sorted(extras_dir.glob("config*.toml")):
+        if p not in config_paths:
+            config_paths.append(p)
 
-Add this to each `cc-connect` config that backs an agent you want to relay through:
+if not config_paths:
+    print("FATAL: No config files found")
+    sys.exit(1)
 
-```toml
+HOOK_BLOCK = """
 [[hooks]]
 event = "message.sent"
 type = "http"
 url = "http://127.0.0.1:9120/cc-connect/hooks/reply"
 async = false
 timeout = 2
+"""
+
+WEBHOOK_BLOCK = """
+[webhook]
+enabled = true
+port = 9110
+path = "/hook"
+"""
+
+changes = []
+
+for path in config_paths:
+    text = path.read_text(encoding="utf-8")
+    modified = False
+
+    # Add [[hooks]] if missing the relay hook URL
+    if "127.0.0.1:9120/cc-connect/hooks/reply" not in text:
+        text = text.rstrip() + "\n" + HOOK_BLOCK
+        modified = True
+        changes.append(f"  {path}: added [[hooks]] for relay")
+
+    # Add [webhook] if missing
+    if "[webhook]" not in text:
+        # Pick an unused port starting from 9110
+        used_ports = set()
+        for m in re.finditer(r"port\s*=\s*(\d+)", text):
+            used_ports.add(int(m.group(1)))
+        port = 9110
+        while port in used_ports:
+            port += 1
+        block = WEBHOOK_BLOCK.replace("port = 9110", f"port = {port}")
+        text = text.rstrip() + "\n" + block
+        modified = True
+        changes.append(f"  {path}: added [webhook] on port {port}")
+
+    if modified:
+        path.write_text(text, encoding="utf-8")
+
+if changes:
+    print("Config changes made:")
+    for c in changes:
+        print(c)
+else:
+    print("All configs already have hooks and webhook. No changes needed.")
+
+# Summary: list discovered agent instances
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+print("\nDiscovered agent instances:")
+for path in config_paths:
+    with path.open("rb") as f:
+        cfg = tomllib.load(f)
+    for proj in cfg.get("projects", []):
+        name = proj.get("name", "unknown")
+        agent_type = proj.get("agent", {}).get("type", "unknown")
+        webhook = cfg.get("webhook", {})
+        wp = webhook.get("port", "none")
+        print(f"  {name:<20} type={agent_type:<14} webhook_port={wp}  config={path}")
+print(f"\nTotal: {len(config_paths)} config file(s)")
+PY
 ```
 
-Use `async = false` here because reply monitoring depends on hook delivery. The local hook handler is lightweight and returns quickly; that is the expected mode for this setup.
+---
 
-Restart each affected `cc-connect` process after editing its config.
+### Step 4: Restart cc-connect daemons
 
-Examples:
+After modifying configs, restart each cc-connect process so it picks up the new hooks.
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.cc-connect.codex
+# Restart all cc-connect launchd services
+for svc in $(launchctl list 2>/dev/null | grep cc-connect | awk '{print $3}'); do
+  echo "Restarting $svc ..."
+  launchctl kickstart -k "gui/$(id -u)/$svc" 2>/dev/null || true
+done
+
+# If no launchd services found, try common label patterns
+if ! launchctl list 2>/dev/null | grep -q cc-connect; then
+  echo "No cc-connect launchd services found. Skipping daemon restart."
+  echo "If cc-connect is running as a foreground process, restart it manually."
+fi
 ```
 
-## Step 4: Verify discovery and live sessions
+---
 
-Run:
-
-```bash
-cc-relay-hub list
-```
-
-Expected:
-
-- agents are listed
-- `Webhook` is not `none` for target agents
-- `Session` is not `none`
-
-If `Session` is `none` or empty:
-
-1. Open that bot's own chat window
-2. Send one normal message manually
-3. Rerun `cc-relay-hub list`
-
-If `Webhook` is `none`, fix the target project's `[webhook]` config and rerun `list`.
-
-## Step 5: Start the hook server
-
-### Manual start
+### Step 5: Start the hook server
 
 ```bash
-node ~/.cc-connect/cc-relay-hub/hook-server.mjs
-```
-
-### macOS launchd
-
-Generate the plist with the actual Node path:
-
-```bash
+# Generate and install launchd plist
 NODE_BIN="$(command -v node)"
+HOME_DIR="$HOME"
+
 cat > ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -259,7 +248,7 @@ cat > ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist <<EOF
   <key>ProgramArguments</key>
   <array>
     <string>${NODE_BIN}</string>
-    <string>${HOME}/.cc-connect/cc-relay-hub/hook-server.mjs</string>
+    <string>${HOME_DIR}/.cc-connect/cc-relay-hub/hook-server.mjs</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -272,139 +261,99 @@ cat > ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist <<EOF
 </dict>
 </plist>
 EOF
+
 launchctl unload ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist 2>/dev/null || true
 launchctl load ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist
 ```
 
-Verify the listener precisely:
+Verify:
 
 ```bash
-lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node
+sleep 1
+lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node && echo "Hook server running on :9120" || echo "WARNING: hook server not listening"
 ```
 
-## Step 6: Verify end-to-end hooks
+---
 
-Use a unique token so validation does not read an old event:
+### Step 6: Bootstrap and verify connectivity
 
 ```bash
-EVENT_FILE=~/.cc-connect/cc-relay-hub/hook-events.jsonl
-TOKEN="relay-hook-$(date +%s)"
-BEFORE=$(wc -l < "$EVENT_FILE" 2>/dev/null || echo 0)
-cc-relay-hub send <agent-name> "ping test ${TOKEN}"
-sleep 5
-AFTER=$(wc -l < "$EVENT_FILE" 2>/dev/null || echo 0)
-test "$AFTER" -gt "$BEFORE"
-tail -n 5 "$EVENT_FILE" | grep "$TOKEN"
+cc-relay-hub bootstrap
 ```
 
-If the final `grep` fails, the hook did not deliver the current event.
+This scans all cc-connect configs, generates `registry.json` / `bindings.json`, and tests each agent's webhook, session, and hook connectivity.
 
-## Step 7: Install the relay skill
+Expected: all agents show `up` status. If an agent shows `down`, check that its cc-connect process is running.
 
-The repo ships with a generic skill file:
+If any agent shows `Session: missing`, send one normal message to that bot in its own chat window, then rerun:
 
-`~/.cc-connect/cc-relay-hub/skills/cc-relay.md`
+```bash
+cc-relay-hub bootstrap
+```
 
-For Claude Code:
+---
+
+### Step 7: Install the relay skill
 
 ```bash
 mkdir -p ~/.claude/skills
 cp ~/.cc-connect/cc-relay-hub/skills/cc-relay.md ~/.claude/skills/
 ```
 
-For other agents, load the same file into their local instruction/skill mechanism. The file does not hardcode peer names; it always discovers current agents with `cc-relay-hub list --format json`.
+---
 
-## Monitoring hook events (no shell loops)
-
-**Do not use `tail -f`, `while true`, or any shell polling loop to monitor
-`hook-events.jsonl`.** Shell polling loops block the calling agent's
-conversation, preventing it from receiving new user messages while the loop
-runs.
-
-The hook server exposes a **long-poll endpoint** that blocks efficiently in a
-single HTTP request:
-
-```
-GET http://127.0.0.1:9120/events/longpoll?since=<ISO timestamp>&timeout=30
-```
-
-- If events exist after `since`, the server returns them immediately.
-- Otherwise, the connection stays open until a new event arrives or `timeout`
-  seconds elapse.
-- The response body is `{"events": [...]}`.
-
-### One-shot: check for new events once
+### Step 8: Final verification
 
 ```bash
-cc-relay-hub watch
+# List all discovered agents
+cc-relay-hub list
+
+# Full connectivity check
+cc-relay-hub bootstrap
+
+# Verify hook server
+lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node && echo "Hook server: OK"
 ```
 
-This makes a single long-poll request (up to 30 seconds by default), prints
-any events, and exits. Safe to call from any tool or agent.
+If all checks pass, installation is complete.
 
-### Continuous: watch events in a loop (single process)
+---
+
+## Quick reference
 
 ```bash
-cc-relay-hub watch --loop --format text
+cc-relay-hub bootstrap              # scan + verify connectivity
+cc-relay-hub list                   # list discovered agents
+cc-relay-hub info <agent>           # agent health details
+cc-relay-hub send <agent> "message" # send a message
+cc-relay-hub send <agent> "msg" --wait --timeout 300  # send and wait for reply
+cc-relay-hub watch                  # one-shot long-poll for events
+cc-relay-hub watch --loop           # continuous event streaming
 ```
-
-This runs a single Python process that repeatedly long-polls the hook server.
-Each iteration blocks until events arrive, prints them, then immediately
-long-polls again. There is no shell `while` loop, no polling sleep, and no
-file-system polling.
-
-### Raw curl (for non-Python consumers)
-
-```bash
-# One-shot: block until an event arrives
-curl -s "http://127.0.0.1:9120/events/longpoll?since=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-# One-shot with custom timeout (seconds)
-curl -s "http://127.0.0.1:9120/events/longpoll?since=$(date -u +%Y-%m-%dT%H:%M:%SZ)&timeout=10"
-```
-
-### For request/reply flow
-
-Use `cc-relay-hub send <agent> "<message>" --wait` instead. The `--wait` flag
-internally polls the cc-connect session file (no shell loop) and blocks until
-a reply arrives or the timeout expires. This is the recommended pattern for
-request/reply delegation between agents.
 
 ## Troubleshooting
 
-### `cc-relay-hub list` shows no agents
+### No agents found
 
-- Confirm Step 5 prerequisite config files exist
-- Rerun `cc-relay-hub list` from the installed wrapper, not from an old shell alias
-- If needed, inspect `~/.cc-connect/config*.toml` and `/opt/homebrew/etc/cc-connect/config.toml`
+- Confirm cc-connect config files exist in `~/.cc-connect/` or `/opt/homebrew/etc/cc-connect/`
+- Run `cc-relay-hub bootstrap` to force re-scan
 
-### `cc-relay-hub list` shows `Session` as `none`
+### Agent shows "down"
 
-Open that bot's chat window, send one normal message, then rerun `cc-relay-hub list`.
+- The agent's cc-connect process is not running or its webhook port is not listening
+- Check: `cc-relay-hub info <agent>`
+- Restart the cc-connect daemon for that project
 
-### Hook events not appearing in `hook-events.jsonl`
+### Hook events not appearing
 
-1. Confirm the hook server is listening:
-   ```bash
-   lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node
-   ```
-2. Confirm the `[[hooks]]` block exists in the correct `cc-connect` config
-3. Restart `cc-connect`
-4. Check `/tmp/cc-relay-hub-hook.log`
-5. Check the relevant `cc-connect` log for hook delivery errors
+- Verify hook server: `lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node`
+- Verify config: each project's TOML must have `[[hooks]]` with url `http://127.0.0.1:9120/cc-connect/hooks/reply`
+- Restart cc-connect after config changes
 
-### `send` reports connection refused
+### Session shows "missing"
 
-The target project's webhook is down or misconfigured. Check:
-
-- `[webhook] enabled = true`
-- `[webhook] port = ...`
-- the target `cc-connect` process is running
-- `cc-relay-hub info <agent>` shows the expected webhook endpoint
-
-### Hook delivery is slow or missing
-
-This setup assumes `async = false` for `message.sent` hooks. If you changed it to `true`, reply monitoring becomes best-effort and no longer guarantees synchronous hook delivery to the local relay.
+- Send one normal message to that bot in its own chat window
+- Rerun `cc-relay-hub bootstrap`
 
 ## Uninstall
 
@@ -414,5 +363,3 @@ rm -f ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist
 rm -f ~/bin/cc-relay-hub
 rm -rf ~/.cc-connect/cc-relay-hub
 ```
-
-Remove the `[[hooks]]` block from each `cc-connect` config if you no longer want local reply monitoring.

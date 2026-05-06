@@ -13,6 +13,7 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Discover current peers with `cc-relay-hub list --format json`.
 - Check a target before sending work with `cc-relay-hub info <agent>`.
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
+- When the user says they added a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan and verify connectivity before using it.
 
 ## Commands
 
