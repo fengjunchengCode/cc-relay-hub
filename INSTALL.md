@@ -24,8 +24,10 @@ Run ALL of these checks. If ANY check fails, **STOP** and report which one faile
 command -v cc-connect || {
   echo "ERROR: cc-connect is not installed."
   echo ""
-  echo "Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md"
-  echo "to install and configure cc-connect, then rerun this installer."
+  echo "Install cc-connect first, then rerun this installer:"
+  echo "  npm install -g cc-connect    # or: brew install cc-connect"
+  echo ""
+  echo "Full guide: https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md"
   exit 1
 }
 
@@ -37,8 +39,15 @@ python3 -c "import sys; assert sys.version_info >= (3,9)" || { echo "FATAL: pyth
 
 # node must be installed
 command -v node || { echo "FATAL: node not found. Run: brew install node"; exit 1; }
+```
 
-# At least one cc-connect config must exist
+If any check above fails, STOP here. Help the user install the missing tool, then start over from Step 0.
+
+### Step 0.5: Ensure cc-connect is configured with at least one agent
+
+Check if cc-connect has any configured projects:
+
+```bash
 python3 -c "
 from pathlib import Path
 import sys
@@ -54,10 +63,7 @@ for p in extras:
     if p not in found:
         found.append(p)
 if not found:
-    print('ERROR: No cc-connect config files found.')
-    print('')
-    print('Follow https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md')
-    print('to install and configure cc-connect, then rerun this installer.')
+    print('NO_CONFIG')
     sys.exit(1)
 print(f'Found {len(found)} config(s):')
 for p in found:
@@ -65,9 +71,19 @@ for p in found:
 "
 ```
 
-If the last check fails, STOP here. Install and configure cc-connect first, then start over from Step 0.
+**If NO_CONFIG is printed** — cc-connect is installed but has no projects configured. Do NOT ask the user to edit TOML files. Instead, use cc-connect's built-in automated setup:
 
-If it passes, continue to Step 1.
+1. **Preferred: Web UI** — run `cc-connect web` to open the visual dashboard where the user can create projects, add platforms, and manage providers through a browser. No TOML editing needed.
+
+2. **Feishu (QR code)** — run `cc-connect feishu setup --project <name>` to create a Feishu app via QR code scan. The command auto-creates the project and writes credentials to config.toml.
+
+3. **Weixin / personal WeChat (QR code)** — run `cc-connect weixin setup --project <name>` to log in via QR code scan.
+
+4. **Other platforms (Telegram, DingTalk, Slack, Discord, etc.)** — use `cc-connect web` to configure through the browser, or follow the platform-specific guide at https://raw.githubusercontent.com/chenhg5/cc-connect/refs/heads/main/INSTALL.md
+
+After setup, rerun this Step 0.5 check to confirm config files exist.
+
+**If config files are found**, continue to Step 1.
 
 ---
 

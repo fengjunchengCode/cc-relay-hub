@@ -79,7 +79,13 @@ cc-connect project A  -- cc-relay-hub send -->  cc-connect project B
 Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/heads/main/INSTALL.md to install and configure cc-relay-hub.
 ```
 
-`INSTALL.md` 是给 AI Agent 执行的全自动安装清单：检查依赖、安装 CLI、自动写入 hook 和 webhook 配置、重启服务、启动 Hook Server、运行 bootstrap 验证连通性。全程无需用户手动干预。
+`INSTALL.md` 是给 AI Agent 执行的全自动安装清单。安装过程中会优先使用 cc-connect 的自动化配置手段：
+
+- `cc-connect web` — 浏览器可视化配置所有平台，无需手动编辑 TOML
+- `cc-connect feishu setup` — 扫码创建飞书应用，自动写入配置
+- `cc-connect weixin setup` — 扫码登录个人微信
+
+检查依赖、自动写入 hook 和 webhook 配置、重启服务、启动 Hook Server、运行 bootstrap 验证连通性。全程无需用户手动编辑配置文件。
 
 ### 手动兜底
 

@@ -83,7 +83,13 @@ Send this prompt to your agent:
 Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/heads/main/INSTALL.md to install and configure cc-relay-hub.
 ```
 
-The install guide is written for agents: it contains checks, exact commands, validation steps, and troubleshooting branches. In normal use, the user should not need to touch TOML manually.
+The install guide is written for agents. It uses cc-connect's built-in automated setup wherever possible:
+
+- `cc-connect web` — visual dashboard for all platforms (no TOML editing)
+- `cc-connect feishu setup` — Feishu app creation via QR code scan
+- `cc-connect weixin setup` — personal WeChat login via QR code scan
+
+The user should not need to edit config files manually.
 
 ### Manual fallback
 
