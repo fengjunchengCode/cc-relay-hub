@@ -1,10 +1,23 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Resolve symlinks to find the real script location.
+# macOS readlink doesn't support -f, so we resolve manually.
+resolve_dir() {
+  local target="$1"
+  while [ -L "$target" ]; do
+    local dir=$(dirname -- "$target")
+    target=$(readlink -- "$target")
+    case "$target" in
+      /*) ;;
+      *) target="$dir/$target" ;;
+    esac
+  done
+  dirname -- "$target"
+}
 
-# Prefer python3 (macOS/Linux), fall back to python (Windows)
-# Skip Windows Store stubs that lack standard library modules
+SCRIPT_DIR="$(resolve_dir "$0")"
+
 if command -v python3 >/dev/null 2>&1; then
   if python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomli" 2>/dev/null; then
     exec python3 "$SCRIPT_DIR/../hub.py" "$@"

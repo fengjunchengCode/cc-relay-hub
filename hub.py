@@ -135,9 +135,9 @@ def bootstrap_registry_and_bindings():
             bindings["cc_connect"][name] = {
                 "config_path": str(config_path),
                 "webhook_host": "127.0.0.1",
-                "webhook_port": int(legacy.get("webhook_port", webhook.get("port", 0))),
-                "webhook_path": webhook.get("path", "/hook"),
-                "session_key": legacy.get("session_key", session_map.get(name, "")),
+                "webhook_port": int(webhook.get("port", 0) or legacy.get("webhook_port", 0)),
+                "webhook_path": webhook.get("path", "/hook") or legacy.get("webhook_path", "/hook"),
+                "session_key": session_map.get(name, "") or legacy.get("session_key", ""),
             }
 
     write_json(REGISTRY_PATH, registry)
