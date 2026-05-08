@@ -636,3 +636,47 @@ class ResolveAgentTest(unittest.TestCase):
         with self.assertRaises(KeyError) as ctx:
             hub.resolve_agent(registry, bindings, "agent")
         self.assertIn("Multiple agents", str(ctx.exception))
+
+    def test_group_prefilter_disambiguates(self):
+        """--group should narrow candidates before same-group preference."""
+        groups = {
+            "alpha": {"description": "", "members": ["agent-a", "agent-c"]},
+            "beta": {"description": "", "members": ["agent-b"]},
+        }
+        registry = _make_registry(groups=groups)
+        bindings = _make_bindings(registry)
+        # "agent" matches a, b, c. --group beta → only agent-b
+        agent = hub.resolve_agent(registry, bindings, "agent", group="beta")
+        self.assertEqual(agent["name"], "agent-b")
+
+    def test_group_prefilter_with_sender(self):
+        """--group + sender together: group filters first, then sender preference."""
+        groups = {
+            "alpha": {"description": "", "members": ["agent-a", "agent-c"]},
+        }
+        registry = _make_registry(groups=groups)
+        bindings = _make_bindings(registry)
+        # "agent" matches a, c in alpha. Sender=agent-a → exclude self → agent-c
+        agent = hub.resolve_agent(registry, bindings, "agent", sender="agent-a", group="alpha")
+        self.assertEqual(agent["name"], "agent-c")
+
+    def test_exact_missing_binding_raises(self):
+        """Exact name with missing binding should raise, not fallback to fuzzy."""
+        registry = _make_registry(groups={})
+        bindings = _make_bindings(registry)
+        # Remove binding for agent-a
+        del bindings["cc_connect"]["agent-a"]
+        with self.assertRaises(KeyError) as ctx:
+            hub.resolve_agent(registry, bindings, "agent-a")
+        self.assertIn("Missing binding", str(ctx.exception))
+
+    def test_exclude_sender_reduces_to_one(self):
+        """After excluding sender, if only 1 candidate remains, return it."""
+        groups = {
+            "alpha": {"description": "", "members": ["agent-a", "agent-b"]},
+        }
+        registry = _make_registry(groups=groups)
+        bindings = _make_bindings(registry)
+        # "agent" matches a, b. Sender=agent-a → exclude → only agent-b
+        agent = hub.resolve_agent(registry, bindings, "agent", sender="agent-a")
+        self.assertEqual(agent["name"], "agent-b")

@@ -234,13 +234,19 @@ def get_agent(registry, bindings, agent_name):
     return combined
 
 
-def _build_agent_entry(registry, bindings, agent_name):
-    """Build full agent dict or None if not found / no binding."""
+def _build_agent_entry(registry, bindings, agent_name, strict_binding=False):
+    """Build full agent dict or None if not found.
+
+    If strict_binding=True, raises KeyError when agent exists but binding is missing.
+    Used for exact-match lookups to surface configuration errors.
+    """
     agent = registry.get("agents", {}).get(agent_name)
     if not agent:
         return None
     binding = bindings.get(agent["provider"], {}).get(agent_name)
     if not binding:
+        if strict_binding:
+            raise KeyError("Missing binding for agent: %s" % agent_name)
         return None
     combined = dict(agent)
     combined["name"] = agent_name
@@ -248,17 +254,18 @@ def _build_agent_entry(registry, bindings, agent_name):
     return combined
 
 
-def resolve_agent(registry, bindings, query, sender=None):
+def resolve_agent(registry, bindings, query, sender=None, group=None):
     """Resolve agent by exact name, then by type/prefix with same-group preference.
 
-    1. Exact name match → return immediately.
+    1. Exact name match → return immediately (strict binding check).
     2. Otherwise find agents whose name contains <query> or whose type equals <query>.
-    3. Among candidates, prefer the one sharing a group with `sender`.
-    4. If multiple same-group candidates remain, raise with disambiguation.
-    5. If no candidates at all, raise KeyError.
+    3. If `group` is given, filter candidates to that group first.
+    4. Among candidates, prefer the one sharing a group with `sender`.
+    5. If multiple same-group candidates remain, raise with disambiguation.
+    6. If no candidates at all, raise KeyError.
     """
-    # 1. Exact match
-    exact = _build_agent_entry(registry, bindings, query)
+    # 1. Exact match (strict: raise if binding missing)
+    exact = _build_agent_entry(registry, bindings, query, strict_binding=True)
     if exact:
         return exact
 
@@ -277,11 +284,25 @@ def resolve_agent(registry, bindings, query, sender=None):
     if len(candidates) == 1:
         return candidates[0]
 
-    # 3. Same-group preference (exclude sender itself from candidates)
+    # 3. --group pre-filter: restrict candidates to the specified group
+    if group:
+        try:
+            group_members = set(get_group_members(registry, group))
+        except KeyError:
+            raise KeyError("Unknown group: %s" % group)
+        candidates = [c for c in candidates if c["name"] in group_members]
+        if not candidates:
+            raise KeyError("No agent matching '%s' in group '%s'" % (query, group))
+        if len(candidates) == 1:
+            return candidates[0]
+
+    # 4. Same-group preference (exclude sender itself from candidates)
     if sender:
         candidates = [c for c in candidates if c["name"] != sender]
         if not candidates:
             raise KeyError("Unknown agent: %s" % query)
+        if len(candidates) == 1:
+            return candidates[0]
         sender_groups = set(get_agent_groups(registry, sender))
         if sender_groups:
             same_group = [c for c in candidates
@@ -295,7 +316,7 @@ def resolve_agent(registry, bindings, query, sender=None):
                         query, ", ".join(sender_groups),
                         ", ".join(c["name"] for c in same_group)))
 
-    # 4. Multiple matches, no sender or no group overlap
+    # 5. Multiple matches, no sender or no group overlap
     names = ", ".join(c["name"] for c in candidates)
     raise KeyError("Multiple agents match '%s': %s. Use exact name or --group." % (query, names))
 
@@ -862,14 +883,14 @@ def cmd_send(args):
     sender = origin_project or os.environ.get("CC_PROJECT") or ""
     filter_group = getattr(args, "group", None)
 
-    # Resolve agent with same-group preference
+    # Resolve agent with same-group preference; --group participates in disambiguation
     try:
-        agent = resolve_agent(registry, bindings, args.agent, sender=sender)
+        agent = resolve_agent(registry, bindings, args.agent, sender=sender, group=filter_group)
     except KeyError as e:
         print("Error: %s" % e)
         return 1
 
-    # --group filter: resolved agent must be in the specified group
+    # Validate resolved agent is in the specified group (catches exact-match bypass)
     if filter_group:
         try:
             members = get_group_members(registry, filter_group)
@@ -1163,20 +1184,22 @@ def cmd_groups(args):
 
 def cmd_relay(args):
     registry, bindings = ensure_registry_and_bindings()
-    from_name = args.from_agent
-    to_name = args.to_agent
 
     # Validate both agents exist
     try:
-        from_agent = resolve_agent(registry, bindings, from_name)
+        from_agent = resolve_agent(registry, bindings, args.from_agent)
     except KeyError as e:
         print("Error: %s" % e)
         return 1
     try:
-        to_agent = resolve_agent(registry, bindings, to_name, sender=from_name)
+        to_agent = resolve_agent(registry, bindings, args.to_agent, sender=from_agent["name"])
     except KeyError as e:
         print("Error: %s" % e)
         return 1
+
+    # Normalize names to resolved values
+    from_name = from_agent["name"]
+    to_name = to_agent["name"]
 
     # Check same group
     from_groups = set(get_agent_groups(registry, from_name))
