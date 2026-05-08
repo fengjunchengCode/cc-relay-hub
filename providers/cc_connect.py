@@ -25,7 +25,9 @@ class CCConnectProvider(MessageProvider, ControlProvider):
     def deliver(self, envelope):
         delivered_at = time.time()
         payload = {
+            "project": self.agent_id,
             "session_key": self.binding["session_key"],
+            "platform": self.binding.get("platform") or _platform_from_session_key(self.binding["session_key"]),
             "prompt": build_relay_prompt(envelope),
             "event": "cc-relay",
         }
@@ -127,7 +129,9 @@ class CCConnectProvider(MessageProvider, ControlProvider):
 
     def execute_command(self, command):
         payload = {
+            "project": self.agent_id,
             "session_key": self.binding["session_key"],
+            "platform": self.binding.get("platform") or _platform_from_session_key(self.binding["session_key"]),
             "prompt": command,
             "event": "cc-relay",
         }
@@ -199,6 +203,12 @@ def _parse_timestamp(value):
         if normalized.endswith("Z"):
             normalized = normalized[:-1] + "+00:00"
         return datetime.strptime(normalized, "%Y-%m-%dT%H:%M:%S.%f%z").timestamp()
+
+
+def _platform_from_session_key(session_key):
+    if not session_key or ":" not in session_key:
+        return ""
+    return session_key.split(":", 1)[0]
 
 
 def _latest_history_timestamp(session_file):

@@ -1,5 +1,7 @@
 import sys
+import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -71,6 +73,16 @@ class BootstrapTest(unittest.TestCase):
         args = hub.parse_args(["bootstrap"])
         result = hub.cmd_bootstrap(args)
         self.assertEqual(result, 1)
+
+    def test_active_session_key_reads_cc_connect_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir) / "bot-a_abcd.json"
+            session_file.write_text(json.dumps({
+                "active_session": {"feishu:chat:user": "s1"},
+                "sessions": {"s1": {"history": []}},
+            }), encoding="utf-8")
+
+            self.assertEqual(hub.active_session_key(session_file), "feishu:chat:user")
 
 
 if __name__ == "__main__":

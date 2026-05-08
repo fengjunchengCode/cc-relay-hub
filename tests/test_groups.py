@@ -532,6 +532,8 @@ class BootstrapContextTest(unittest.TestCase):
                 content = (Path(tmpdir) / "AGENTS.md").read_text()
                 # Should not have duplicate "## Available Peers"
                 self.assertEqual(content.count("## Available Peers"), 1)
+                self.assertEqual(content.count("## Message Routing Contract"), 1)
+                self.assertIn("Do not use `cc-connect relay send`", content)
             finally:
                 os.chdir(str(old_cwd))
                 hub.REGISTRY_PATH = old_reg

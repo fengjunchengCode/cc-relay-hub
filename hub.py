@@ -20,11 +20,12 @@ except ModuleNotFoundError:
 from core.envelope import RelayEnvelope
 from core.match import parse_relay_reply, wait_for_reply_framework
 from core.state import StateStore
-from providers.cc_connect import CCConnectProvider
+from providers.cc_connect import CCConnectProvider, _platform_from_session_key
 
 
 DATA_DIR = Path.home() / ".cc-connect"
 HUB_DIR = DATA_DIR / "cc-relay-hub"
+HUB_BIN = HUB_DIR / "bin" / "cc-relay-hub"
 REGISTRY_PATH = HUB_DIR / "registry.json"
 BINDINGS_PATH = HUB_DIR / "bindings.json"
 LEGACY_CONFIG_PATH = HUB_DIR / "config.json"
@@ -166,8 +167,34 @@ def session_keys_by_agent():
             continue
         agent_name = stem.rsplit("_", 1)[0]
         if agent_name not in session_map:
-            session_map[agent_name] = stem
+            session_map[agent_name] = active_session_key(session_file) or stem
     return session_map
+
+
+def active_session_key(session_file):
+    try:
+        data = load_json(session_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    active = data.get("active_session") or {}
+    if not active:
+        return None
+    if len(active) == 1:
+        return next(iter(active.keys()))
+
+    sessions = data.get("sessions") or {}
+    best_key = None
+    best_timestamp = -1.0
+    for session_key, session_id in active.items():
+        session = sessions.get(session_id) or {}
+        history = session.get("history") or []
+        timestamp = 0.0
+        if history:
+            timestamp = _parse_event_timestamp(history[-1].get("timestamp"))
+        if timestamp > best_timestamp:
+            best_key = session_key
+            best_timestamp = timestamp
+    return best_key or next(iter(active.keys()))
 
 
 def load_legacy_agent_config():
@@ -180,6 +207,12 @@ def load_legacy_agent_config():
 def bootstrap_registry_and_bindings():
     legacy_agents = load_legacy_agent_config()
     session_map = session_keys_by_agent()
+
+    # Preserve existing groups from current registry
+    existing_registry = {}
+    if REGISTRY_PATH.exists():
+        existing_registry = load_json(REGISTRY_PATH)
+
     registry = {"version": 2, "agents": {}}
     bindings = {"cc_connect": {}, "cdp": {}}
 
@@ -193,6 +226,7 @@ def bootstrap_registry_and_bindings():
             name = project.get("name", "unknown")
             agent_cfg = project.get("agent", {})
             options = agent_cfg.get("options", {})
+            session_key = session_map.get(name, "") or legacy.get("session_key", "")
             registry["agents"][name] = {
                 "type": agent_cfg.get("type", "unknown"),
                 "provider": "cc_connect",
@@ -206,8 +240,14 @@ def bootstrap_registry_and_bindings():
                 "webhook_host": "127.0.0.1",
                 "webhook_port": int(webhook.get("port", 0) or legacy.get("webhook_port", 0)),
                 "webhook_path": webhook.get("path", "/hook") or legacy.get("webhook_path", "/hook"),
-                "session_key": session_map.get(name, "") or legacy.get("session_key", ""),
+                "session_key": session_key,
+                "platform": legacy.get("platform", "") or _platform_from_session_key(session_key),
             }
+
+    # Preserve groups from existing registry
+    existing_groups = existing_registry.get("groups", {})
+    if existing_groups:
+        registry["groups"] = existing_groups
 
     write_json(REGISTRY_PATH, registry)
     write_json(BINDINGS_PATH, bindings)
@@ -688,6 +728,40 @@ def cmd_bootstrap(args):
 # Agent context file adapters
 # Each adapter: (filename, generator_fn(registry, bindings, agent_name) -> str or None)
 
+def _hub_command():
+    return str(HUB_BIN)
+
+
+def _routing_contract_lines(agent_name=None):
+    cmd = _hub_command()
+    relay_from = agent_name or "<from-agent>"
+    return [
+        "## Message Routing Contract",
+        "",
+        "cc-connect relay and cc-relay-hub are different systems. Keep them separate.",
+        "",
+        "Use cc-relay-hub for direct agent-to-agent work, especially when the user says:",
+        "- \"send a message to codex\"",
+        "- \"ask Claude/Codex\"",
+        "- \"let another agent continue\"",
+        "- \"delegate this to <agent>\"",
+        "- \"relay to <agent>\"",
+        "",
+        "Use these commands:",
+        "```bash",
+        "%s list --format json" % cmd,
+        "%s info <agent>" % cmd,
+        "%s send <agent> \"task\" --wait --timeout 120" % cmd,
+        "%s relay %s <to-agent> \"task\" --timeout 120" % (cmd, relay_from),
+        "```",
+        "",
+        "Use cc-connect relay only for cc-connect's group-chat relay feature after a chat has been bound with /bind.",
+        "Do not use `cc-connect relay send` for direct/private agent-to-agent delegation.",
+        "If the user says \"send to codex\" or \"ask codex\", default to cc-relay-hub.",
+        "",
+    ]
+
+
 def _generate_agents_md(registry, bindings, agent_name):
     """Generate AGENTS.md content — universal source of truth."""
     lines = []
@@ -715,6 +789,8 @@ def _generate_agents_md(registry, bindings, agent_name):
         group_str = " [%s]" % ",".join(a_groups) if a_groups else ""
         lines.append("  %-16s %s%s" % (name, a.get("type", "?"), group_str))
     lines.append("```\n")
+
+    lines.extend(_routing_contract_lines(agent_name))
 
     # Static body from template (NOT from generated output)
     template = HUB_DIR / "templates" / "AGENTS.md"
@@ -749,6 +825,8 @@ def _generate_claude_md(registry, bindings, agent_name):
     if agent_name:
         lines.append("You are: **%s**\n" % agent_name)
 
+    lines.extend(_routing_contract_lines(agent_name))
+
     # Peers
     lines.append("## Peers\n")
     for name in sorted(registry.get("agents", {}).keys()):
@@ -782,10 +860,12 @@ def _generate_cursor_rules(registry, bindings, agent_name):
     if agent_name:
         lines.append("Your agent name: %s" % agent_name)
     lines.append("")
+    lines.extend(_routing_contract_lines(agent_name))
+    lines.append("")
     lines.append("## Commands")
-    lines.append("- List agents: `python3 hub.py list`")
-    lines.append("- Send message: `python3 hub.py send <agent> \"msg\" --wait`")
-    lines.append("- Check health: `python3 hub.py info <agent>`")
+    lines.append("- List agents: `%s list --format json`" % _hub_command())
+    lines.append("- Send message: `%s send <agent> \"msg\" --wait`" % _hub_command())
+    lines.append("- Check health: `%s info <agent>`" % _hub_command())
     lines.append("")
     lines.append("## Rules")
     lines.append("- Never hardcode agent names. Discover with `hub.py list`.")

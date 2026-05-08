@@ -68,6 +68,7 @@ class CCConnectProviderTest(unittest.TestCase):
                 self.assertEqual(receipt.status, "delivered")
                 payload = CaptureHandler.payloads[-1]
                 self.assertEqual(payload["session_key"], "feishu:s1:u1")
+                self.assertEqual(payload["platform"], "feishu")
                 self.assertEqual(payload["event"], "cc-relay")
                 self.assertIn("ping", payload["prompt"])
                 self.assertIn("[cc-relay request_id=req-1]", payload["prompt"])

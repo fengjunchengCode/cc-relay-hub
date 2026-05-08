@@ -15,6 +15,15 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
 - When the user says they added a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and auto-generate agent context files (AGENTS.md, CLAUDE.md, etc.).
 
+## Routing Contract
+
+`cc-connect relay` and `cc-relay-hub` are different systems:
+
+- Use `cc-relay-hub` for direct/private agent-to-agent delegation: "send to codex", "ask Claude", "let another agent continue", or "relay to <agent>".
+- Use `cc-connect relay` only for cc-connect's group-chat relay feature after a chat has been bound with `/bind`.
+- Do not use `cc-connect relay send` as the default implementation for "send a message to codex".
+- If the user asks to contact another coding agent by name or type, default to `cc-relay-hub`.
+
 ## Agent Resolution
 
 `send`, `info`, and `relay` commands resolve agent names with same-group preference:
