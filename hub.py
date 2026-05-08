@@ -986,13 +986,14 @@ def cmd_send(args):
     state = StateStore(str(STATE_DB_PATH))
     session_key = agent["binding"].get("session_key", "")
 
-    # Weak isolation: warn on cross-group send
+    # Group isolation: reject cross-group sends when both sides have groups.
     if sender and not filter_group:
         if not check_group_compatibility(registry, sender, agent["name"]):
             sender_g = get_agent_groups(registry, sender)
             target_g = get_agent_groups(registry, agent["name"])
-            print("Warning: cross-group send (%s in [%s] -> %s in [%s])" % (
+            print("Error: cross-group send blocked (%s in [%s] -> %s in [%s])" % (
                 sender, ", ".join(sender_g), agent["name"], ", ".join(target_g)))
+            return 1
 
     if agent["provider"] != "cdp" and not session_key:
         print("Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"])

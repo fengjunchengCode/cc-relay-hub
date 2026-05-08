@@ -326,6 +326,42 @@ class CmdSendGroupTest(unittest.TestCase):
                 hub.REGISTRY_PATH = old_path
                 Path(f.name).unlink(missing_ok=True)
 
+    def test_send_cross_group_fails(self):
+        groups = {
+            "g1": {"members": ["agent-a"]},
+            "g2": {"members": ["agent-b"]},
+        }
+        registry = _make_registry(groups)
+        bindings = {
+            "cc_connect": {
+                "agent-a": {"webhook_port": 0, "session_key": "feishu:a:u"},
+                "agent-b": {"webhook_port": 0, "session_key": "feishu:b:u"},
+            },
+            "cdp": {},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as rf:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as bf:
+                json.dump(registry, rf)
+                rf.flush()
+                json.dump(bindings, bf)
+                bf.flush()
+                old_reg = hub.REGISTRY_PATH
+                old_bind = hub.BINDINGS_PATH
+                old_env = unittest.mock.patch.dict("os.environ", {"CC_PROJECT": "agent-a"})
+                hub.REGISTRY_PATH = Path(rf.name)
+                hub.BINDINGS_PATH = Path(bf.name)
+                try:
+                    old_env.start()
+                    args = hub.parse_args(["send", "agent-b", "hello"])
+                    result = hub.cmd_send(args)
+                    self.assertEqual(result, 1)
+                finally:
+                    old_env.stop()
+                    hub.REGISTRY_PATH = old_reg
+                    hub.BINDINGS_PATH = old_bind
+                    Path(rf.name).unlink(missing_ok=True)
+                    Path(bf.name).unlink(missing_ok=True)
+
 
 class MutateRegistryGroupsTest(unittest.TestCase):
     def test_atomic_create_and_delete(self):
