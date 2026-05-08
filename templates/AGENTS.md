@@ -49,3 +49,12 @@ Check your group: `cc-relay-hub list --format json`
 - Never use shell polling loops (`tail -f`, `while true`, `sleep`).
 - Use `cc-relay-hub send --wait` for request/reply.
 - Check agent health before sending work.
+
+## Agent Name Resolution
+
+When you use `send`, `info`, or `relay`, the agent name is resolved as:
+1. **Exact match** — `send codex-bot` finds `codex-bot` directly.
+2. **Fuzzy match** — `send codex` matches agents with "codex" in name or type.
+3. **Same-group preference** — among fuzzy matches, the agent in your group is preferred. You are identified by the `CC_PROJECT` environment variable.
+
+If multiple agents match and you're unsure, use `cc-relay-hub list` to see exact names.

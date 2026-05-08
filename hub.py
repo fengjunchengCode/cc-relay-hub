@@ -234,6 +234,72 @@ def get_agent(registry, bindings, agent_name):
     return combined
 
 
+def _build_agent_entry(registry, bindings, agent_name):
+    """Build full agent dict or None if not found / no binding."""
+    agent = registry.get("agents", {}).get(agent_name)
+    if not agent:
+        return None
+    binding = bindings.get(agent["provider"], {}).get(agent_name)
+    if not binding:
+        return None
+    combined = dict(agent)
+    combined["name"] = agent_name
+    combined["binding"] = binding
+    return combined
+
+
+def resolve_agent(registry, bindings, query, sender=None):
+    """Resolve agent by exact name, then by type/prefix with same-group preference.
+
+    1. Exact name match → return immediately.
+    2. Otherwise find agents whose name contains <query> or whose type equals <query>.
+    3. Among candidates, prefer the one sharing a group with `sender`.
+    4. If multiple same-group candidates remain, raise with disambiguation.
+    5. If no candidates at all, raise KeyError.
+    """
+    # 1. Exact match
+    exact = _build_agent_entry(registry, bindings, query)
+    if exact:
+        return exact
+
+    # 2. Fuzzy: name contains query, or type matches query
+    all_agents = registry.get("agents", {})
+    candidates = []
+    for name, info in all_agents.items():
+        if query in name or info.get("type", "") == query:
+            entry = _build_agent_entry(registry, bindings, name)
+            if entry:
+                candidates.append(entry)
+
+    if not candidates:
+        raise KeyError("Unknown agent: %s" % query)
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # 3. Same-group preference (exclude sender itself from candidates)
+    if sender:
+        candidates = [c for c in candidates if c["name"] != sender]
+        if not candidates:
+            raise KeyError("Unknown agent: %s" % query)
+        sender_groups = set(get_agent_groups(registry, sender))
+        if sender_groups:
+            same_group = [c for c in candidates
+                          if set(get_agent_groups(registry, c["name"])) & sender_groups]
+            if len(same_group) == 1:
+                return same_group[0]
+            if len(same_group) > 1:
+                raise KeyError(
+                    "Multiple agents match '%s' in sender's group [%s]: %s. "
+                    "Use exact name." % (
+                        query, ", ".join(sender_groups),
+                        ", ".join(c["name"] for c in same_group)))
+
+    # 4. Multiple matches, no sender or no group overlap
+    names = ", ".join(c["name"] for c in candidates)
+    raise KeyError("Multiple agents match '%s': %s. Use exact name or --group." % (query, names))
+
+
 def get_provider(agent):
     if agent["provider"] == "cc_connect":
         return CCConnectProvider(agent["name"], agent["binding"])
@@ -517,7 +583,12 @@ def cmd_list(args):
 
 def cmd_info(args):
     registry, bindings = ensure_registry_and_bindings()
-    agent = get_agent(registry, bindings, args.agent)
+    sender = os.environ.get("CC_PROJECT") or ""
+    try:
+        agent = resolve_agent(registry, bindings, args.agent, sender=sender)
+    except KeyError as e:
+        print("Error: %s" % e)
+        return 1
     status = format_status(agent)
 
     print("  Agent:       %s" % agent["name"])
@@ -787,33 +858,40 @@ def cmd_bootstrap_context(args):
 def cmd_send(args):
     registry, bindings = ensure_registry_and_bindings()
 
-    # Group-aware agent resolution
+    origin_project, origin_session = resolve_origin_context(args)
+    sender = origin_project or os.environ.get("CC_PROJECT") or ""
     filter_group = getattr(args, "group", None)
+
+    # Resolve agent with same-group preference
+    try:
+        agent = resolve_agent(registry, bindings, args.agent, sender=sender)
+    except KeyError as e:
+        print("Error: %s" % e)
+        return 1
+
+    # --group filter: resolved agent must be in the specified group
     if filter_group:
         try:
             members = get_group_members(registry, filter_group)
         except KeyError:
             print("Error: unknown group '%s'" % filter_group)
             return 1
-        if args.agent not in members:
+        if agent["name"] not in members:
             print("Error: agent '%s' is not in group '%s'. Members: %s" % (
-                args.agent, filter_group, ", ".join(members)))
+                agent["name"], filter_group, ", ".join(members)))
             return 1
 
-    agent = get_agent(registry, bindings, args.agent)
     provider = get_provider(agent)
     state = StateStore(str(STATE_DB_PATH))
     session_key = agent["binding"].get("session_key", "")
-    origin_project, origin_session = resolve_origin_context(args)
 
     # Weak isolation: warn on cross-group send
-    sender = origin_project or os.environ.get("CC_PROJECT") or ""
     if sender and not filter_group:
-        if not check_group_compatibility(registry, sender, args.agent):
+        if not check_group_compatibility(registry, sender, agent["name"]):
             sender_g = get_agent_groups(registry, sender)
-            target_g = get_agent_groups(registry, args.agent)
+            target_g = get_agent_groups(registry, agent["name"])
             print("Warning: cross-group send (%s in [%s] -> %s in [%s])" % (
-                sender, ", ".join(sender_g), args.agent, ", ".join(target_g)))
+                sender, ", ".join(sender_g), agent["name"], ", ".join(target_g)))
 
     if agent["provider"] != "cdp" and not session_key:
         print("Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"])
@@ -1090,14 +1168,14 @@ def cmd_relay(args):
 
     # Validate both agents exist
     try:
-        from_agent = get_agent(registry, bindings, from_name)
-    except KeyError:
-        print("Error: unknown agent '%s'" % from_name)
+        from_agent = resolve_agent(registry, bindings, from_name)
+    except KeyError as e:
+        print("Error: %s" % e)
         return 1
     try:
-        to_agent = get_agent(registry, bindings, to_name)
-    except KeyError:
-        print("Error: unknown agent '%s'" % to_name)
+        to_agent = resolve_agent(registry, bindings, to_name, sender=from_name)
+    except KeyError as e:
+        print("Error: %s" % e)
         return 1
 
     # Check same group

@@ -536,3 +536,103 @@ class BootstrapContextTest(unittest.TestCase):
                 os.chdir(str(old_cwd))
                 hub.REGISTRY_PATH = old_reg
                 hub.BINDINGS_PATH = old_bind
+
+
+def _make_bindings(registry):
+    """Create a bindings dict matching the agents in registry."""
+    bindings = {"cc_connect": {}, "cdp": {}}
+    for name, info in registry.get("agents", {}).items():
+        provider = info["provider"]
+        bindings.setdefault(provider, {})[name] = {
+            "session_key": "sess:%s" % name,
+            "webhook_host": "127.0.0.1",
+            "webhook_port": 9110,
+            "webhook_path": "/hook",
+        }
+    return bindings
+
+
+class ResolveAgentTest(unittest.TestCase):
+    """Tests for resolve_agent — exact match, fuzzy match, same-group preference."""
+
+    def test_exact_match_returns_agent(self):
+        registry = _make_registry(groups={})
+        bindings = _make_bindings(registry)
+        agent = hub.resolve_agent(registry, bindings, "agent-a")
+        self.assertEqual(agent["name"], "agent-a")
+
+    def test_exact_match_always_preferred(self):
+        """Even if another agent's name contains the query, exact wins."""
+        registry = _make_registry(groups={})
+        registry["agents"]["codex-main"] = {"type": "codex", "provider": "cc_connect",
+                                             "work_dir": "/tmp", "capabilities": [], "labels": []}
+        bindings = _make_bindings(registry)
+        agent = hub.resolve_agent(registry, bindings, "agent-b")
+        self.assertEqual(agent["name"], "agent-b")
+
+    def test_fuzzy_by_type(self):
+        registry = _make_registry(groups={})
+        bindings = _make_bindings(registry)
+        # "codex" should match agent-b (type=codex)
+        agent = hub.resolve_agent(registry, bindings, "codex")
+        self.assertEqual(agent["name"], "agent-b")
+
+    def test_fuzzy_by_name_substring(self):
+        registry = _make_registry(groups={})
+        bindings = _make_bindings(registry)
+        # "agent" matches all three, no sender → should raise
+        with self.assertRaises(KeyError) as ctx:
+            hub.resolve_agent(registry, bindings, "agent")
+        self.assertIn("Multiple agents", str(ctx.exception))
+
+    def test_fuzzy_same_group_preference(self):
+        """When multiple candidates match, prefer the one in sender's group."""
+        groups = {
+            "alpha": {"description": "", "members": ["agent-a", "agent-c"]},
+            "beta": {"description": "", "members": ["agent-b"]},
+        }
+        registry = _make_registry(groups=groups)
+        bindings = _make_bindings(registry)
+        # "agent" matches a, b, c. Sender=agent-a (group alpha) → should pick agent-c
+        agent = hub.resolve_agent(registry, bindings, "agent", sender="agent-a")
+        self.assertEqual(agent["name"], "agent-c")
+
+    def test_fuzzy_same_group_single_match(self):
+        """Fuzzy match + same-group narrows to exactly one."""
+        groups = {
+            "alpha": {"description": "", "members": ["agent-a"]},
+            "beta": {"description": "", "members": ["agent-b"]},
+        }
+        registry = _make_registry(groups=groups)
+        bindings = _make_bindings(registry)
+        # "codex" matches agent-b only → returns it regardless of sender
+        agent = hub.resolve_agent(registry, bindings, "codex", sender="agent-a")
+        self.assertEqual(agent["name"], "agent-b")
+
+    def test_fuzzy_multiple_same_group_raises(self):
+        """Multiple same-group matches should raise with disambiguation."""
+        groups = {
+            "alpha": {"description": "", "members": ["agent-a", "agent-b", "agent-c"]},
+        }
+        registry = _make_registry(groups=groups)
+        bindings = _make_bindings(registry)
+        # "agent" matches a, b, c. Sender=agent-a → exclude self → b, c in alpha → ambiguous
+        with self.assertRaises(KeyError) as ctx:
+            hub.resolve_agent(registry, bindings, "agent", sender="agent-a")
+        self.assertIn("Multiple agents", str(ctx.exception))
+        self.assertIn("agent-b", str(ctx.exception))
+        self.assertIn("agent-c", str(ctx.exception))
+
+    def test_no_match_raises(self):
+        registry = _make_registry(groups={})
+        bindings = _make_bindings(registry)
+        with self.assertRaises(KeyError):
+            hub.resolve_agent(registry, bindings, "nonexistent")
+
+    def test_no_sender_no_group_falls_through(self):
+        """Without sender, multiple matches raise generic disambiguation."""
+        registry = _make_registry(groups={})
+        bindings = _make_bindings(registry)
+        with self.assertRaises(KeyError) as ctx:
+            hub.resolve_agent(registry, bindings, "agent")
+        self.assertIn("Multiple agents", str(ctx.exception))

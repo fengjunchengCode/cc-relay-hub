@@ -15,6 +15,17 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
 - When the user says they added a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and auto-generate agent context files (AGENTS.md, CLAUDE.md, etc.).
 
+## Agent Resolution
+
+`send`, `info`, and `relay` commands resolve agent names with same-group preference:
+
+1. **Exact name match** — always wins (`send codex-bot` → finds `codex-bot`).
+2. **Fuzzy match** — if no exact match, matches by type or name substring (`send codex` → finds agents with "codex" in name or type=codex).
+3. **Same-group preference** — among fuzzy matches, prefers the agent sharing a group with the sender (detected via `CC_PROJECT` env var). The sender itself is excluded from candidates.
+4. **Disambiguation** — if multiple same-group matches remain, the command errors with a list. Use exact name.
+
+This means: if you have `codex-alpha` (group A) and `codex-beta` (group B), and you're in group A, `send codex "msg"` automatically picks `codex-alpha`.
+
 ## Commands
 
 ```bash
