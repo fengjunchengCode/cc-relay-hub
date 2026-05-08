@@ -1,6 +1,6 @@
 # cc-relay-hub
 
-<p align="center">A local dispatch layer for AI agents already connected by cc-connect.</p>
+<p align="center">A local coordination layer for AI agents, cc-connect bots, and CDP-controlled Electron IDEs.</p>
 
 <p align="center">
   <a href="https://github.com/fengjunchengCode/cc-relay-hub/blob/main/README_zh.md">中文</a> · English
@@ -23,7 +23,7 @@ Codex: build and report back
 cc-relay-hub: forward the reply to Claude Code's original chat session
 ```
 
-This is not a replacement for cc-connect. It is a small local coordination layer that uses cc-connect's webhook and hook system as the transport.
+This is not a replacement for cc-connect. It is a small local coordination layer that can deliver through cc-connect webhooks or control Electron IDEs through Chrome DevTools Protocol.
 
 > Single host only. cc-relay-hub reads local cc-connect config files, talks to local webhook endpoints, and runs its hook server on `127.0.0.1`.
 
@@ -41,6 +41,7 @@ cc-relay-hub is different. It is built for **agent-driven orchestration**.
 | Request tracking | Chat history oriented | SQLite state, request IDs, session locks, reply attribution |
 | Reply path | Reply appears in the chat platform conversation | Reply is forwarded back to the originating agent session |
 | Waiting model | Human watches the chat | `send --wait` and long-poll `watch`, safe for agent tools |
+| IDE reach | Agents with cc-connect transport | cc-connect agents plus Electron IDEs exposed over local CDP |
 
 The practical benefit is that an agent can run a controlled handoff:
 
@@ -70,6 +71,83 @@ cc-connect project A  -- cc-relay-hub send -->  cc-connect project B
 3. The task is delivered through Agent B's local cc-connect webhook
 4. Agent B replies; cc-connect emits a `message.sent` hook
 5. cc-relay-hub matches the reply to the original request and sends it back to Agent A's session
+
+CDP agents use the same relay core with a different provider path:
+
+```text
+Agent / Skill  -- cc-relay-hub send -->  CDP provider  -- WebSocket -->  Electron IDE
+     ^                                      |
+     +--------- marker-matched reply <------+
+```
+
+The CDP provider types the relay prompt into the IDE, reads the DOM transcript, and extracts the `[cc-relay reply_to=...]` marker from the answer. No hook server is required for CDP replies.
+
+## Providers
+
+| Provider | Transport | Reply detection | Best fit |
+| --- | --- | --- | --- |
+| `cc_connect` | Local HTTP webhook | `message.sent` hook server | Claude Code, Codex, or any agent already bridged by cc-connect |
+| `cdp` | Chrome DevTools Protocol WebSocket | DOM transcript polling with relay markers | Electron IDEs such as Antigravity, Cursor, or other IDE UIs with local CDP enabled |
+
+Example CDP binding:
+
+```json
+{
+  "agents": {
+    "antigravity-ide": {
+      "type": "antigravity",
+      "provider": "cdp",
+      "work_dir": "/path/to/project",
+      "capabilities": ["message.send", "session.control"],
+      "labels": ["ide"]
+    }
+  }
+}
+```
+
+```json
+{
+  "cdp": {
+    "antigravity-ide": {
+      "backend": "antigravity",
+      "cdp_port": 9000
+    }
+  }
+}
+```
+
+Keep CDP ports bound to localhost. A CDP port gives automation access to the IDE window.
+
+## Groups and Relay
+
+Groups provide weak isolation for agent-to-agent communication. Agents in the same group can relay to each other; for backward compatibility, agents with no group assignment can still communicate.
+
+```bash
+cc-relay-hub groups create core --description "Main project agents"
+cc-relay-hub groups join core claudecode
+cc-relay-hub groups join core codex-bot
+cc-relay-hub groups show core
+```
+
+Use `relay` when one agent should send work as itself to another agent and wait for a reply:
+
+```bash
+cc-relay-hub relay claudecode codex-bot "Review the failing test and suggest a fix" --timeout 120
+```
+
+`relay` always waits. If the origin agent is a cc-connect provider with a session key, the reply is also forwarded back into that origin session.
+
+## Bootstrap Context
+
+`bootstrap context` generates agent-native context files from the current registry so newly cloned projects can teach agents how to use the relay without hand-written setup.
+
+```bash
+cc-relay-hub bootstrap context --print
+cc-relay-hub bootstrap context --check
+cc-relay-hub bootstrap context --write
+```
+
+Generated files include `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `.cursorrules`. When multiple agents are registered, per-agent files are written under `.cc-relay-hub/<agent>/` so each agent receives the right identity and peer list.
 
 ## Quick Start
 
@@ -144,11 +222,15 @@ cc-relay-hub send <agent> "Ping from another agent" --wait --timeout 120
 | Command | Description |
 | --- | --- |
 | `cc-relay-hub bootstrap` | Scan configs, write registry, verify connectivity |
+| `cc-relay-hub bootstrap context --write` | Generate AGENTS.md and agent-native context files |
 | `cc-relay-hub list` | Discover configured local agents |
 | `cc-relay-hub list --format json` | Return machine-readable peer data for agent skills |
 | `cc-relay-hub info <agent>` | Show webhook, session, and health details |
 | `cc-relay-hub send <agent> "<msg>"` | Send a message to a peer agent |
 | `cc-relay-hub send <agent> "<msg>" --wait` | Send and wait for the matched reply |
+| `cc-relay-hub groups` | List and manage agent groups |
+| `cc-relay-hub relay <from> <to> "<msg>"` | Send a group-scoped agent-to-agent request and wait |
+| `cc-relay-hub cdp status <agent>` | Check a CDP-backed Electron IDE agent |
 | `cc-relay-hub watch` | One-shot long-poll for new hook events |
 | `cc-relay-hub watch --loop` | Continuous event stream for a human terminal or tmux pane |
 
@@ -177,15 +259,17 @@ For other agents, load the same file into their project instruction or skill sys
 │              │◄────│  state.db    │◄────│ cc-connect   │
 └──────────────┘     └──────────────┘     └──────────────┘
                            │
-                     ┌─────┴─────┐
-                     │ Hook Server│ :9120
-                     └───────────┘
+             ┌──────────────┬──────────────┐
+             │ Hook Server  │ CDP Backend  │
+             │ :9120        │ Electron IDE │
+             └──────────────┴──────────────┘
 ```
 
 - **Discovery** reads local `~/.cc-connect/config*.toml` files and session metadata
-- **Provider** sends through cc-connect local webhooks
+- **Provider** sends through cc-connect local webhooks or local CDP WebSockets
 - **State** stores request IDs, session locks, delivery status, replies, and notification status
 - **Hook server** receives `message.sent` events and forwards matched replies to the origin session
+- **Bootstrap context** writes project-local instructions so agents can discover peers and follow the relay protocol
 
 ## Operational notes
 
@@ -193,6 +277,7 @@ For other agents, load the same file into their project instruction or skill sys
 - Enable `[webhook]` for both the origin project and the target project
 - Add the `message.sent` hook to projects that should return replies through the relay
 - Bootstrap each bot once by sending a normal message in its own chat window
+- Keep CDP debugging ports local to `127.0.0.1` and close them when not needed
 - Do not use `tail -f`, `while true`, or shell polling loops for events; use `send --wait` or `watch`
 - The hook server listens on `127.0.0.1:9120` by default
 
