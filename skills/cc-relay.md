@@ -13,18 +13,38 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Discover current peers with `cc-relay-hub list --format json`.
 - Check a target before sending work with `cc-relay-hub info <agent>`.
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
-- When the user says they added a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan and verify connectivity before using it.
+- When the user says they added a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and auto-generate agent context files (AGENTS.md, CLAUDE.md, etc.).
 
 ## Commands
 
 ```bash
-cc-relay-hub list --format json
+# Discovery
+cc-relay-hub list [--group <name>] [--format json|table]
 cc-relay-hub info <agent>
+
+# Send (via webhook, NOT Feishu API)
 cc-relay-hub send <agent> "<message>"
 cc-relay-hub send <agent> "<message>" --wait --timeout 300
+cc-relay-hub send <agent> "<message>" --group <group>
+
+# Groups
+cc-relay-hub groups                          # list all groups
+cc-relay-hub groups show <name>              # show group members + status
+cc-relay-hub groups create <name> [--desc "..."]
+cc-relay-hub groups join <group> <agent>
+cc-relay-hub groups leave <group> <agent>
+
+# Relay (agent-to-agent, always waits)
+cc-relay-hub relay <from-agent> <to-agent> "<message>"
+
+# Events
 cc-relay-hub watch                        # one-shot: block until an event arrives
 cc-relay-hub watch --loop --format text   # continuous: stream events as they arrive
-cc-relay-hub watch --since "2025-01-01T00:00:00Z"  # only events after a timestamp
+
+# CDP (Electron IDE)
+cc-relay-hub cdp status <agent>
+cc-relay-hub cdp models <agent>
+cc-relay-hub cdp screenshot <agent>
 ```
 
 ## Recommended flow
@@ -34,6 +54,14 @@ cc-relay-hub watch --since "2025-01-01T00:00:00Z"  # only events after a timesta
 3. Send a concrete task with `cc-relay-hub send`.
 4. Use `--wait` only when you need serialized request/reply flow on that target session.
 5. To check for incoming events, use `cc-relay-hub watch` (one-shot) or `cc-relay-hub watch --loop`.
+
+## CRITICAL: How delivery works
+
+`cc-relay-hub send` delivers via **HTTP POST to cc-connect webhook** (not Feishu API).
+- `send codex-bot "msg"` → POST to `http://127.0.0.1:9112/hook`
+- `send my-project "msg"` → POST to `http://127.0.0.1:9110/hook`
+- No echo filter — the message is processed by cc-connect and forwarded to the agent.
+- Do NOT use Feishu API directly to send messages to bots (echo filter drops bot's own messages).
 
 ## CRITICAL: Never use shell polling loops
 

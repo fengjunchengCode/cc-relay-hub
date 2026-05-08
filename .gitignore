@@ -8,3 +8,11 @@ token_cache.json
 config.json
 registry.json
 bindings.json
+
+# Generated context files (from bootstrap context)
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/.cursorrules
+*.bak
+.cc-relay-hub/

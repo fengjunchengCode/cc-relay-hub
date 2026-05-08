@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -36,26 +37,72 @@ def parse_args(argv):
 
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--format", choices=["table", "json"], default="table")
+    list_parser.add_argument("--group", default=None, help="Filter by group name")
 
     send_parser = subparsers.add_parser("send")
     send_parser.add_argument("agent")
     send_parser.add_argument("message")
     send_parser.add_argument("--wait", action="store_true")
     send_parser.add_argument("--timeout", type=int, default=300)
+    send_parser.add_argument("--group", default=None, help="Target group for agent lookup")
     send_parser.add_argument("--origin-project", default=None, help=argparse.SUPPRESS)
     send_parser.add_argument("--origin-session", default=None, help=argparse.SUPPRESS)
 
     info_parser = subparsers.add_parser("info")
     info_parser.add_argument("agent")
 
-    subparsers.add_parser("bootstrap", help="Scan configs, write registry/bindings, verify connectivity")
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="Scan configs, write registry/bindings, verify connectivity")
+    bootstrap_sub = bootstrap_parser.add_subparsers(dest="bootstrap_command")
+    ctx_parser = bootstrap_sub.add_parser("context", help="Generate agent context files (AGENTS.md, CLAUDE.md, etc.)")
+    ctx_parser.add_argument("--write", action="store_true", help="Write context files to disk")
+    ctx_parser.add_argument("--check", action="store_true", help="Check if context files are up to date")
+    ctx_parser.add_argument("--print", action="store_true", dest="print_mode", help="Print context to stdout")
     subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
+
+    # Groups management
+    groups_parser = subparsers.add_parser("groups", help="Manage agent groups")
+    groups_sub = groups_parser.add_subparsers(dest="groups_command")
+    groups_sub.add_parser("list", help="List all groups")
+    p_show = groups_sub.add_parser("show", help="Show group members")
+    p_show.add_argument("name")
+    p_create = groups_sub.add_parser("create", help="Create a new group")
+    p_create.add_argument("name")
+    p_create.add_argument("--description", default="")
+    p_delete = groups_sub.add_parser("delete", help="Delete a group")
+    p_delete.add_argument("name")
+    p_join = groups_sub.add_parser("join", help="Add agent to group")
+    p_join.add_argument("group")
+    p_join.add_argument("agent")
+    p_leave = groups_sub.add_parser("leave", help="Remove agent from group")
+    p_leave.add_argument("group")
+    p_leave.add_argument("agent")
+
+    # Relay command (intra-group agent-to-agent, always waits for reply)
+    relay_parser = subparsers.add_parser("relay", help="Send message between agents in the same group")
+    relay_parser.add_argument("from_agent")
+    relay_parser.add_argument("to_agent")
+    relay_parser.add_argument("message")
+    relay_parser.add_argument("--timeout", type=int, default=300)
 
     watch_parser = subparsers.add_parser("watch", help="Long-poll for hook events (no shell loop needed)")
     watch_parser.add_argument("--since", default=None, help="ISO-8601 timestamp; only return events after this time")
     watch_parser.add_argument("--timeout", type=int, default=30, help="Per-request timeout in seconds (default: 30)")
     watch_parser.add_argument("--loop", action="store_true", help="Continuously poll until Ctrl-C (default: one-shot)")
     watch_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    # CDP provider subcommands
+    cdp_parser = subparsers.add_parser("cdp", help="CDP provider management")
+    cdp_sub = cdp_parser.add_subparsers(dest="cdp_command")
+    cdp_sub.add_parser("status", help="Show CDP agent health").add_argument("agent")
+    p_screenshot = cdp_sub.add_parser("screenshot", help="Take CDP screenshot")
+    p_screenshot.add_argument("agent")
+    p_screenshot.add_argument("--path", default="/tmp/ide_screenshot.png")
+    cdp_sub.add_parser("models", help="List available models").add_argument("agent")
+    p_switch = cdp_sub.add_parser("switch", help="Switch model")
+    p_switch.add_argument("agent")
+    p_switch.add_argument("model")
+    cdp_sub.add_parser("probe", help="Run UI diagnostics").add_argument("agent")
+    cdp_sub.add_parser("heal", help="Run auto-healer").add_argument("agent")
 
     return parser.parse_args(argv)
 
@@ -70,6 +117,28 @@ def write_json(path, payload):
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
+
+
+def mutate_registry_groups(mutator_fn):
+    """Atomically read registry.json, apply mutator_fn(groups), write back.
+
+    Uses fcntl.flock to prevent concurrent mutations from losing updates.
+    mutator_fn receives the groups dict and must modify it in-place.
+    """
+    lock_path = REGISTRY_PATH.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            registry = load_json(REGISTRY_PATH)
+            groups = registry.get("groups", {})
+            mutator_fn(groups)
+            registry["groups"] = groups
+            tmp = REGISTRY_PATH.with_suffix(".tmp")
+            write_json(tmp, registry)
+            os.replace(str(tmp), str(REGISTRY_PATH))
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
 
 def find_configs():
@@ -168,7 +237,35 @@ def get_agent(registry, bindings, agent_name):
 def get_provider(agent):
     if agent["provider"] == "cc_connect":
         return CCConnectProvider(agent["name"], agent["binding"])
+    if agent["provider"] == "cdp":
+        from providers.cdp_provider import CDPProvider
+        return CDPProvider(agent["name"], agent["binding"])
     raise ValueError("Unsupported provider: %s" % agent["provider"])
+
+
+def get_groups(registry):
+    return registry.get("groups", {})
+
+
+def get_agent_groups(registry, agent_name):
+    groups = get_groups(registry)
+    return [name for name, g in groups.items() if agent_name in g.get("members", [])]
+
+
+def get_group_members(registry, group_name):
+    groups = get_groups(registry)
+    group = groups.get(group_name)
+    if not group:
+        raise KeyError("Unknown group: %s" % group_name)
+    return list(group.get("members", []))
+
+
+def check_group_compatibility(registry, sender, target):
+    sender_groups = set(get_agent_groups(registry, sender))
+    target_groups = set(get_agent_groups(registry, target))
+    if not sender_groups or not target_groups:
+        return True
+    return bool(sender_groups & target_groups)
 
 
 def resolve_origin_context(args):
@@ -381,8 +478,12 @@ def format_status(agent):
 
 def cmd_list(args):
     registry, bindings = ensure_registry_and_bindings()
+    filter_group = getattr(args, "group", None)
     agents = []
     for agent_name in sorted(registry.get("agents", {}).keys()):
+        agent_groups = get_agent_groups(registry, agent_name)
+        if filter_group and filter_group not in agent_groups:
+            continue
         agent = get_agent(registry, bindings, agent_name)
         agents.append({
             "name": agent_name,
@@ -391,6 +492,7 @@ def cmd_list(args):
             "work_dir": agent["work_dir"],
             "webhook_port": agent["binding"].get("webhook_port", 0),
             "session_key": agent["binding"].get("session_key", ""),
+            "groups": ", ".join(agent_groups) if agent_groups else "-",
         })
 
     if args.format == "json":
@@ -399,17 +501,17 @@ def cmd_list(args):
 
     print("Found %d agent(s):" % len(agents))
     print("")
-    print("  {0:<16} {1:<12} {2:<12} {3:<10} {4}".format(
-        "Name", "Type", "Provider", "Webhook", "Session"
+    print("  {0:<16} {1:<12} {2:<12} {3:<10} {4:<10} {5}".format(
+        "Name", "Type", "Provider", "Group", "Webhook", "Session"
     ))
-    print("  {0:<16} {1:<12} {2:<12} {3:<10} {4}".format(
-        "─" * 16, "─" * 12, "─" * 12, "─" * 10, "─" * 28
+    print("  {0:<16} {1:<12} {2:<12} {3:<10} {4:<10} {5}".format(
+        "─" * 16, "─" * 12, "─" * 12, "─" * 10, "─" * 10, "─" * 28
     ))
     for item in agents:
         webhook = ":%s" % item["webhook_port"] if item["webhook_port"] else "none"
         session_key = item["session_key"] or "none"
-        print("  {0:<16} {1:<12} {2:<12} {3:<10} {4}".format(
-            item["name"], item["type"], item["provider"], webhook, session_key
+        print("  {0:<16} {1:<12} {2:<12} {3:<10} {4:<10} {5}".format(
+            item["name"], item["type"], item["provider"], item["groups"], webhook, session_key
         ))
 
 
@@ -477,26 +579,247 @@ def cmd_bootstrap(args):
         print("  → Send a message to each bot via its chat platform (Feishu/Telegram/etc.),")
         print("    then rerun: cc-relay-hub bootstrap")
         print()
+
+    # Auto-generate context files
+    print("Generating agent context files...")
+    ctx_args = argparse.Namespace(write=True, check=False, print_mode=False)
+    cmd_bootstrap_context(ctx_args)
+
     if all_ok:
-        print("All agents reachable.")
+        print("\nAll agents reachable.")
         return 0
     else:
-        print("Some agents are unreachable. Check that cc-connect is running.")
+        print("\nSome agents are unreachable. Check that cc-connect is running.")
         return 1
+
+
+# Agent context file adapters
+# Each adapter: (filename, generator_fn(registry, bindings, agent_name) -> str or None)
+
+def _generate_agents_md(registry, bindings, agent_name):
+    """Generate AGENTS.md content — universal source of truth."""
+    lines = []
+
+    # Dynamic header with agent info
+    lines.append("# cc-relay-hub Agent Context\n")
+    lines.append("You are connected to **cc-relay-hub**, a local multi-agent message router.\n")
+
+    if agent_name:
+        lines.append("Your agent name: **%s**\n" % agent_name)
+
+    # Groups
+    agent_groups = get_agent_groups(registry, agent_name) if agent_name else []
+    if agent_groups:
+        lines.append("Your groups: %s\n" % ", ".join(agent_groups))
+
+    # Peers (dynamic, from registry)
+    lines.append("\n## Available Peers\n")
+    lines.append("```")
+    for name in sorted(registry.get("agents", {}).keys()):
+        if name == agent_name:
+            continue
+        a = registry["agents"][name]
+        a_groups = get_agent_groups(registry, name)
+        group_str = " [%s]" % ",".join(a_groups) if a_groups else ""
+        lines.append("  %-16s %s%s" % (name, a.get("type", "?"), group_str))
+    lines.append("```\n")
+
+    # Static body from template (NOT from generated output)
+    template = HUB_DIR / "templates" / "AGENTS.md"
+    if template.exists():
+        content = template.read_text(encoding="utf-8")
+        # Skip the first heading (we already wrote our own)
+        in_body = False
+        for line in content.split("\n"):
+            if in_body:
+                lines.append(line)
+            elif line.startswith("## "):
+                in_body = True
+                lines.append("\n" + line)
+
+    return "\n".join(lines)
+
+
+def _generate_claude_md(registry, bindings, agent_name):
+    """Generate CLAUDE.md for Claude Code agents."""
+    lines = []
+    lines.append("# cc-relay-hub\n")
+    lines.append("Multi-agent message router. Use `hub.py` to discover peers and send messages.\n")
+    lines.append("## Quick Reference\n")
+    lines.append("```bash")
+    lines.append("cd %s" % HUB_DIR)
+    lines.append("python3 hub.py list")
+    lines.append("python3 hub.py send <agent> \"message\" --wait --timeout 120")
+    lines.append("python3 hub.py groups")
+    lines.append("python3 hub.py relay <from> <to> \"message\"")
+    lines.append("```\n")
+
+    if agent_name:
+        lines.append("You are: **%s**\n" % agent_name)
+
+    # Peers
+    lines.append("## Peers\n")
+    for name in sorted(registry.get("agents", {}).keys()):
+        if name == agent_name:
+            continue
+        a = registry["agents"][name]
+        lines.append("- **%s** (%s)" % (name, a.get("type", "?")))
+
+    # Key facts
+    lines.append("\n## Key Facts\n")
+    lines.append("- Send via webhook (not platform API). No echo filter.")
+    lines.append("- CDP agents use virtual session key `cdp:<agent_name>`")
+    lines.append("- Hook-server long-poll: `GET http://127.0.0.1:9120/events/longpoll`")
+    lines.append("- When receiving relay markers, reply with the same marker.")
+    return "\n".join(lines)
+
+
+def _generate_gemini_md(registry, bindings, agent_name):
+    """Generate GEMINI.md for Gemini CLI agents."""
+    return _generate_claude_md(registry, bindings, agent_name).replace(
+        "# cc-relay-hub", "# cc-relay-hub (Gemini)"
+    )
+
+
+def _generate_cursor_rules(registry, bindings, agent_name):
+    """Generate .cursorrules for Cursor agents."""
+    lines = []
+    lines.append("# cc-relay-hub")
+    lines.append("")
+    lines.append("You are connected to cc-relay-hub, a local multi-agent message router.")
+    if agent_name:
+        lines.append("Your agent name: %s" % agent_name)
+    lines.append("")
+    lines.append("## Commands")
+    lines.append("- List agents: `python3 hub.py list`")
+    lines.append("- Send message: `python3 hub.py send <agent> \"msg\" --wait`")
+    lines.append("- Check health: `python3 hub.py info <agent>`")
+    lines.append("")
+    lines.append("## Rules")
+    lines.append("- Never hardcode agent names. Discover with `hub.py list`.")
+    lines.append("- Check agent health before sending work.")
+    lines.append("- When receiving relay markers, reply with the same marker.")
+    return "\n".join(lines)
+
+
+# (filename, generator, per_agent)
+# per_agent=False: generated once, universal (e.g. AGENTS.md)
+# per_agent=True: generated for each agent (e.g. CLAUDE.md)
+_CONTEXT_ADAPTERS = [
+    ("AGENTS.md", _generate_agents_md, False),
+    ("CLAUDE.md", _generate_claude_md, True),
+    ("GEMINI.md", _generate_gemini_md, True),
+    (".cursorrules", _generate_cursor_rules, True),
+]
+
+
+def cmd_bootstrap_context(args):
+    registry, bindings = ensure_registry_and_bindings()
+    agents = registry.get("agents", {})
+    do_write = getattr(args, "write", False)
+    do_check = getattr(args, "check", False)
+    do_print = getattr(args, "print_mode", False)
+
+    if not do_write and not do_check and not do_print:
+        do_print = True
+
+    project_dir = Path.cwd()
+    results = []
+
+    for filename, generator, per_agent in _CONTEXT_ADAPTERS:
+        agent_names = sorted(agents.keys()) if per_agent else [None]
+        for agent_name in agent_names:
+            content = generator(registry, bindings, agent_name)
+            if content is None:
+                continue
+
+            # Determine output path
+            if not per_agent:
+                out_path = project_dir / filename
+            elif len(agents) > 1:
+                out_path = project_dir / ".cc-relay-hub" / agent_name / filename
+            else:
+                out_path = project_dir / filename
+
+            if do_print:
+                print("=== %s ===" % out_path)
+                print(content)
+                print()
+                continue
+
+            if do_check:
+                exists = out_path.exists()
+                current = out_path.read_text(encoding="utf-8") if exists else ""
+                up_to_date = exists and current.strip() == content.strip()
+                status = "ok" if up_to_date else ("missing" if not exists else "outdated")
+                results.append((str(out_path), status))
+                continue
+
+            if do_write:
+                if out_path.exists():
+                    backup = out_path.with_suffix(out_path.suffix + ".bak")
+                    backup.write_text(out_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(content, encoding="utf-8")
+                results.append((str(out_path), "written"))
+
+    if do_check:
+        print("Context file status:")
+        for path, status in results:
+            marker = {"ok": "  ", "missing": "!!", "outdated": "~ "}.get(status, "??")
+            print("  [%s] %s" % (marker, path))
+        outdated = [r for r in results if r[1] != "ok"]
+        if outdated:
+            print("\n%d file(s) need update. Run: cc-relay-hub bootstrap context --write" % len(outdated))
+            return 1
+        print("\nAll context files up to date.")
+        return 0
+
+    if do_write:
+        for path, status in results:
+            print("  %s: %s" % (status, path))
+        return 0
+
+    return 0
 
 
 def cmd_send(args):
     registry, bindings = ensure_registry_and_bindings()
+
+    # Group-aware agent resolution
+    filter_group = getattr(args, "group", None)
+    if filter_group:
+        try:
+            members = get_group_members(registry, filter_group)
+        except KeyError:
+            print("Error: unknown group '%s'" % filter_group)
+            return 1
+        if args.agent not in members:
+            print("Error: agent '%s' is not in group '%s'. Members: %s" % (
+                args.agent, filter_group, ", ".join(members)))
+            return 1
+
     agent = get_agent(registry, bindings, args.agent)
     provider = get_provider(agent)
     state = StateStore(str(STATE_DB_PATH))
     session_key = agent["binding"].get("session_key", "")
     origin_project, origin_session = resolve_origin_context(args)
 
-    if not session_key:
+    # Weak isolation: warn on cross-group send
+    sender = origin_project or os.environ.get("CC_PROJECT") or ""
+    if sender and not filter_group:
+        if not check_group_compatibility(registry, sender, args.agent):
+            sender_g = get_agent_groups(registry, sender)
+            target_g = get_agent_groups(registry, args.agent)
+            print("Warning: cross-group send (%s in [%s] -> %s in [%s])" % (
+                sender, ", ".join(sender_g), args.agent, ", ".join(target_g)))
+
+    if agent["provider"] != "cdp" and not session_key:
         print("Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"])
         return 1
 
+    effective_session = session_key or "cdp:%s" % agent["name"]
     request_id = uuid.uuid4().hex
     now = time.time()
     envelope = RelayEnvelope(
@@ -512,7 +835,7 @@ def cmd_send(args):
         request_id=request_id,
         sender=envelope.sender,
         target=envelope.target,
-        session_key=session_key,
+        session_key=effective_session,
         provider=agent["provider"],
         body=envelope.body,
         status="pending",
@@ -521,10 +844,10 @@ def cmd_send(args):
         origin_session_key=origin_session,
     )
 
-    locked = state.acquire_session_lock(session_key, request_id, args.timeout)
+    locked = state.acquire_session_lock(effective_session, request_id, args.timeout)
     if not locked:
         state.mark_failed(request_id, "busy")
-        print("busy: session %s already has a pending request" % session_key)
+        print("busy: session %s already has a pending request" % effective_session)
         return 1
 
     is_control = args.message.startswith("/") and provider.supports_control()
@@ -532,7 +855,7 @@ def cmd_send(args):
         result = provider.execute_command(args.message)
         if result.status != "delivered":
             state.mark_failed(request_id, result.error or "command failed")
-            state.release_session_lock(session_key, request_id)
+            state.release_session_lock(effective_session, request_id)
             print("Error: %s" % (result.error or "command failed"))
             return 1
         state.mark_delivered(request_id, result.executed_at)
@@ -540,7 +863,7 @@ def cmd_send(args):
         receipt = provider.deliver(envelope)
         if receipt.status != "delivered":
             state.mark_failed(request_id, receipt.error or "delivery failed")
-            state.release_session_lock(session_key, request_id)
+            state.release_session_lock(effective_session, request_id)
             print("Error: %s" % (receipt.error or "delivery failed"))
             return 1
         state.mark_delivered(request_id, receipt.delivered_at)
@@ -553,7 +876,7 @@ def cmd_send(args):
         store=state,
         provider=provider,
         request_id=request_id,
-        session_key=session_key,
+        session_key=effective_session,
         timeout_secs=args.timeout,
         poll_interval=1.0,
     )
@@ -641,15 +964,332 @@ def cmd_watch(args):
             return 0
 
 
+def cmd_groups(args):
+    registry, bindings = ensure_registry_and_bindings()
+    groups = get_groups(registry)
+    subcmd = getattr(args, "groups_command", None) or "list"
+
+    if subcmd == "list":
+        if not groups:
+            print("No groups defined. Use 'cc-relay groups create <name>' to create one.")
+            return 0
+        for name, group in sorted(groups.items()):
+            desc = group.get("description", "")
+            members = group.get("members", [])
+            label = " (%s)" % desc if desc else ""
+            print("  %s%s — %d member(s): %s" % (name, label, len(members), ", ".join(members)))
+        return 0
+
+    if subcmd == "show":
+        group = groups.get(args.name)
+        if not group:
+            print("Error: unknown group '%s'" % args.name)
+            return 1
+        desc = group.get("description", "")
+        members = group.get("members", [])
+        print("Group: %s%s" % (args.name, " (%s)" % desc if desc else ""))
+        print("  Members:")
+        for m in members:
+            try:
+                agent = get_agent(registry, bindings, m)
+                agent_groups = get_agent_groups(registry, m)
+                try:
+                    health = format_status(agent)
+                    status = "%s (%s)" % (health["provider_status"], health["agent_status"])
+                except Exception:
+                    status = "error"
+                print("    %-16s %-12s %-12s %s" % (m, agent["type"], agent["provider"], status))
+            except KeyError:
+                print("    %-16s (not in registry)" % m)
+        return 0
+
+    if subcmd == "create":
+        def _create(g):
+            if args.name in g:
+                raise ValueError("already exists")
+            g[args.name] = {"description": args.description, "members": []}
+        try:
+            mutate_registry_groups(_create)
+        except ValueError:
+            print("Error: group '%s' already exists" % args.name)
+            return 1
+        print("Created group '%s'" % args.name)
+        return 0
+
+    if subcmd == "delete":
+        def _delete(g):
+            if args.name not in g:
+                raise ValueError("not found")
+            del g[args.name]
+        try:
+            mutate_registry_groups(_delete)
+        except ValueError:
+            print("Error: unknown group '%s'" % args.name)
+            return 1
+        print("Deleted group '%s'" % args.name)
+        return 0
+
+    if subcmd == "join":
+        registry_ro = load_json(REGISTRY_PATH)
+        if args.agent not in registry_ro.get("agents", {}):
+            print("Error: unknown agent '%s'" % args.agent)
+            return 1
+        result = []
+        def _join(g):
+            group = g.get(args.group)
+            if not group:
+                raise ValueError("group not found")
+            members = group.get("members", [])
+            if args.agent in members:
+                result.append("already")
+                return
+            members.append(args.agent)
+            group["members"] = members
+        try:
+            mutate_registry_groups(_join)
+        except ValueError:
+            print("Error: unknown group '%s'" % args.group)
+            return 1
+        if result and result[0] == "already":
+            print("Agent '%s' is already in group '%s'" % (args.agent, args.group))
+        else:
+            print("Added '%s' to group '%s'" % (args.agent, args.group))
+        return 0
+
+    if subcmd == "leave":
+        result = []
+        def _leave(g):
+            group = g.get(args.group)
+            if not group:
+                raise ValueError("group not found")
+            members = group.get("members", [])
+            if args.agent not in members:
+                result.append("not_member")
+                return
+            members.remove(args.agent)
+            group["members"] = members
+        try:
+            mutate_registry_groups(_leave)
+        except ValueError:
+            print("Error: unknown group '%s'" % args.group)
+            return 1
+        if result and result[0] == "not_member":
+            print("Agent '%s' is not in group '%s'" % (args.agent, args.group))
+        else:
+            print("Removed '%s' from group '%s'" % (args.agent, args.group))
+        return 0
+
+    print("Usage: cc-relay groups <list|show|create|delete|join|leave>")
+    return 1
+
+
+def cmd_relay(args):
+    registry, bindings = ensure_registry_and_bindings()
+    from_name = args.from_agent
+    to_name = args.to_agent
+
+    # Validate both agents exist
+    try:
+        from_agent = get_agent(registry, bindings, from_name)
+    except KeyError:
+        print("Error: unknown agent '%s'" % from_name)
+        return 1
+    try:
+        to_agent = get_agent(registry, bindings, to_name)
+    except KeyError:
+        print("Error: unknown agent '%s'" % to_name)
+        return 1
+
+    # Check same group
+    from_groups = set(get_agent_groups(registry, from_name))
+    to_groups = set(get_agent_groups(registry, to_name))
+    if from_groups and to_groups and not (from_groups & to_groups):
+        print("Error: '%s' and '%s' are not in the same group." % (from_name, to_name))
+        print("  %s groups: %s" % (from_name, ", ".join(from_groups) or "-"))
+        print("  %s groups: %s" % (to_name, ", ".join(to_groups) or "-"))
+        return 1
+
+    # Send message from from_agent's context to to_agent
+    to_session = to_agent["binding"].get("session_key", "")
+    if to_agent["provider"] != "cdp" and not to_session:
+        print("Error: agent '%s' has no session_key yet." % to_name)
+        return 1
+
+    from_session = from_agent["binding"].get("session_key", "")
+    from_project = from_agent["binding"].get("session_key", "").split(":")[0] if from_session else from_name
+
+    state = StateStore(str(STATE_DB_PATH))
+    effective_session = to_session or "cdp:%s" % to_name
+    request_id = uuid.uuid4().hex
+    now = time.time()
+
+    envelope = RelayEnvelope(
+        request_id=request_id,
+        sender=from_name,
+        target=to_name,
+        body=args.message,
+        created_at=now,
+        reply_to=None,
+        ttl=int(args.timeout),
+    )
+    state.insert_message(
+        request_id=request_id,
+        sender=from_name,
+        target=to_name,
+        session_key=effective_session,
+        provider=to_agent["provider"],
+        body=envelope.body,
+        status="pending",
+        created_at=now,
+        origin_project=from_name,
+        origin_session_key=from_session,
+    )
+
+    locked = state.acquire_session_lock(effective_session, request_id, args.timeout)
+    if not locked:
+        state.mark_failed(request_id, "busy")
+        print("busy: agent '%s' already has a pending request" % to_name)
+        return 1
+
+    provider = get_provider(to_agent)
+    receipt = provider.deliver(envelope)
+    if receipt.status != "delivered":
+        state.mark_failed(request_id, receipt.error or "delivery failed")
+        state.release_session_lock(effective_session, request_id)
+        print("Error: %s" % (receipt.error or "delivery failed"))
+        return 1
+    state.mark_delivered(request_id, receipt.delivered_at)
+    print("[%s → %s] Message sent. Waiting for reply..." % (from_name, to_name))
+
+    reply = wait_for_reply_framework(
+        store=state,
+        provider=provider,
+        request_id=request_id,
+        session_key=effective_session,
+        timeout_secs=args.timeout,
+        poll_interval=1.0,
+    )
+    if reply is None:
+        print("timeout: no reply from '%s' within %ds" % (to_name, args.timeout))
+        return 1
+
+    print("[%s → %s] Reply:" % (to_name, from_name))
+    print(reply)
+
+    # Notify the from-agent about the reply (only for cc_connect with valid session)
+    if from_agent["provider"] == "cc_connect" and from_session:
+        notify = notify_origin_reply(
+            {"origin_project": from_name, "origin_session_key": from_session, "target": to_name},
+            reply, bindings=bindings,
+        )
+        if notify["status"] == "sent":
+            state.mark_notified(request_id, time.time())
+        elif notify["status"] == "failed":
+            state.mark_notify_failed(request_id, notify.get("error", "unknown"))
+            print("Warning: reply notification to '%s' failed: %s" % (from_name, notify.get("error", "")))
+    else:
+        print("Note: reply not forwarded to '%s' (provider=%s, no session)" % (
+            from_name, from_agent["provider"]))
+    return 0
+
+
+def cmd_cdp(args):
+    """Dispatch CDP provider subcommands."""
+    cdp_cmd = args.cdp_command
+    if not cdp_cmd:
+        print("Usage: cc-relay cdp <status|screenshot|models|switch|probe|heal> <agent>")
+        return 1
+
+    registry, bindings = ensure_registry_and_bindings()
+    try:
+        agent = get_agent(registry, bindings, args.agent)
+    except KeyError as exc:
+        print("Error: %s" % exc)
+        return 1
+
+    if agent.get("provider") != "cdp":
+        print("Error: agent '%s' is not a CDP provider (provider=%s)" % (
+            args.agent, agent.get("provider")))
+        return 1
+
+    provider = get_provider(agent)
+
+    if cdp_cmd == "status":
+        health = provider.get_health()
+        print("Agent: %s" % args.agent)
+        print("Provider: %s" % health.provider_status)
+        print("Agent status: %s" % health.agent_status)
+        print("Details: %s" % health.details)
+        return 0 if health.provider_status == "up" else 1
+
+    # Commands that need the backend connected
+    try:
+        backend = provider._ensure_backend()
+    except Exception as exc:
+        print("Error connecting to CDP: %s" % exc)
+        return 1
+
+    if cdp_cmd == "screenshot":
+        path = getattr(args, "path", "/tmp/ide_screenshot.png")
+        saved = backend.take_screenshot(path)
+        print("Screenshot saved: %s" % saved)
+        return 0
+
+    if cdp_cmd == "models":
+        if not hasattr(backend, "list_models"):
+            print("Model listing not supported for %s" % backend.name)
+            return 1
+        models = backend.list_models()
+        print(json.dumps(models, ensure_ascii=False, indent=2))
+        return 0
+
+    if cdp_cmd == "switch":
+        if not hasattr(backend, "switch_model"):
+            print("Model switching not supported for %s" % backend.name)
+            return 1
+        result = backend.switch_model(args.model)
+        print(result)
+        return 0 if result == "SWITCHED" else 1
+
+    if cdp_cmd == "probe":
+        from cdp.auto_heal import UIProbe
+        backend.enable_auto_heal()
+        conn = backend.ensure_conn()
+        probe = UIProbe(conn)
+        dom = probe.dump_dom_snapshot()
+        print("DOM snapshot (%d chars):" % len(dom))
+        print(dom[:3000])
+        return 0
+
+    if cdp_cmd == "heal":
+        backend.enable_auto_heal()
+        if not backend._healer:
+            print("Auto-heal not available")
+            return 1
+        report = backend._healer.heal_chat_input()
+        print("Target: %s" % report.target)
+        print("Success: %s" % report.success)
+        if report.new_selector:
+            print("Selector: %s" % report.new_selector)
+        if report.error:
+            print("Error: %s" % report.error)
+        return 0 if report.success else 1
+
+    print("Unknown cdp command: %s" % cdp_cmd)
+    return 1
+
+
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     if not args.command:
-        print("Usage: cc-relay <list|send|info> ...")
+        print("Usage: cc-relay <list|send|info|groups|relay|cdp> ...")
         return 1
     if args.command == "list":
         cmd_list(args)
         return 0
     if args.command == "bootstrap":
+        if getattr(args, "bootstrap_command", None) == "context":
+            return cmd_bootstrap_context(args)
         return cmd_bootstrap(args)
     if args.command == "send":
         return cmd_send(args)
@@ -660,6 +1300,12 @@ def main(argv=None):
         return cmd_on_hook(args)
     if args.command == "watch":
         return cmd_watch(args)
+    if args.command == "groups":
+        return cmd_groups(args)
+    if args.command == "relay":
+        return cmd_relay(args)
+    if args.command == "cdp":
+        return cmd_cdp(args)
     return 1
 
 

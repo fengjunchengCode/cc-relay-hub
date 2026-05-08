@@ -13,20 +13,8 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 from core.envelope import CommandResult, DeliveryReceipt, ProviderHealth, RelayEvent
+from core.relay_protocol import build_relay_prompt
 from providers.base import ControlProvider, MessageProvider
-
-
-def build_relay_prompt(envelope):
-    return "\n".join([
-        "[cc-relay request_id=%s]" % envelope.request_id,
-        "",
-        envelope.body,
-        "",
-        "Relay protocol:",
-        "When you answer this request, start your final response with exactly this line:",
-        "[cc-relay reply_to=%s]" % envelope.request_id,
-        "Then put your answer after that marker. Do not use this marker for any other conversation.",
-    ])
 
 
 class CCConnectProvider(MessageProvider, ControlProvider):
