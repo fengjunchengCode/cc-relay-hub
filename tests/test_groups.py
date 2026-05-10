@@ -1,6 +1,7 @@
 """Tests for group management in hub.py."""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -475,7 +476,7 @@ class BootstrapContextTest(unittest.TestCase):
             try:
                 import os
                 os.chdir(tmpdir)
-                args = hub.parse_args(["bootstrap", "context", "--print"])
+                args = hub.parse_args(["bootstrap", "context", "--print", "--scope", "cwd"])
                 result = hub.cmd_bootstrap_context(args)
                 self.assertEqual(result, 0)
                 # No files should be written
@@ -502,12 +503,12 @@ class BootstrapContextTest(unittest.TestCase):
                 import os
                 os.chdir(tmpdir)
                 # Write
-                args = hub.parse_args(["bootstrap", "context", "--write"])
+                args = hub.parse_args(["bootstrap", "context", "--write", "--scope", "cwd"])
                 result = hub.cmd_bootstrap_context(args)
                 self.assertEqual(result, 0)
                 self.assertTrue((Path(tmpdir) / "AGENTS.md").exists())
                 # Check should pass
-                args = hub.parse_args(["bootstrap", "context", "--check"])
+                args = hub.parse_args(["bootstrap", "context", "--check", "--scope", "cwd"])
                 result = hub.cmd_bootstrap_context(args)
                 self.assertEqual(result, 0)
             finally:
@@ -535,7 +536,7 @@ class BootstrapContextTest(unittest.TestCase):
                 agents_path = Path(tmpdir) / "AGENTS.md"
                 agents_path.write_text("old content")
                 # Write should backup
-                args = hub.parse_args(["bootstrap", "context", "--write"])
+                args = hub.parse_args(["bootstrap", "context", "--write", "--scope", "cwd"])
                 hub.cmd_bootstrap_context(args)
                 self.assertTrue((Path(tmpdir) / "AGENTS.md.bak").exists())
                 self.assertEqual((Path(tmpdir) / "AGENTS.md.bak").read_text(), "old content")
@@ -562,7 +563,7 @@ class BootstrapContextTest(unittest.TestCase):
                 import os
                 os.chdir(tmpdir)
                 # Write twice
-                args = hub.parse_args(["bootstrap", "context", "--write"])
+                args = hub.parse_args(["bootstrap", "context", "--write", "--scope", "cwd"])
                 hub.cmd_bootstrap_context(args)
                 hub.cmd_bootstrap_context(args)
                 content = (Path(tmpdir) / "AGENTS.md").read_text()
@@ -574,6 +575,89 @@ class BootstrapContextTest(unittest.TestCase):
                 os.chdir(str(old_cwd))
                 hub.REGISTRY_PATH = old_reg
                 hub.BINDINGS_PATH = old_bind
+
+    def test_global_scope_writes_cc_connect_style_memory_files(self):
+        registry = {
+            "version": 2,
+            "agents": {
+                "claude-a": {"type": "claudecode", "provider": "cc_connect", "work_dir": "/tmp",
+                              "capabilities": [], "labels": []},
+                "codex-a": {"type": "codex", "provider": "cc_connect", "work_dir": "/tmp",
+                             "capabilities": [], "labels": []},
+            },
+        }
+        bindings = {"cc_connect": {"claude-a": {}, "codex-a": {}}, "cdp": {}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_reg = hub.REGISTRY_PATH
+            old_bind = hub.BINDINGS_PATH
+            reg_path = Path(tmpdir) / "registry.json"
+            bind_path = Path(tmpdir) / "bindings.json"
+            reg_path.write_text(json.dumps(registry))
+            bind_path.write_text(json.dumps(bindings))
+            hub.REGISTRY_PATH = reg_path
+            hub.BINDINGS_PATH = bind_path
+            try:
+                with unittest.mock.patch.dict(os.environ, {"HOME": tmpdir, "CODEX_HOME": str(Path(tmpdir) / ".codex")}):
+                    args = hub.parse_args(["bootstrap", "context", "--write", "--scope", "global"])
+                    result = hub.cmd_bootstrap_context(args)
+                self.assertEqual(result, 0)
+                claude_file = Path(tmpdir) / ".claude" / "CLAUDE.md"
+                codex_file = Path(tmpdir) / ".codex" / "AGENTS.md"
+                self.assertTrue(claude_file.exists())
+                self.assertTrue(codex_file.exists())
+                self.assertIn("cc-relay-hub:begin", claude_file.read_text())
+                self.assertIn("cc-relay-hub:begin", codex_file.read_text())
+            finally:
+                hub.REGISTRY_PATH = old_reg
+                hub.BINDINGS_PATH = old_bind
+
+    def test_workdirs_scope_preserves_project_agents_md(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work_dir = Path(tmpdir) / "project"
+            history_dir = Path(tmpdir) / "history"
+            data_dir = Path(tmpdir) / "data"
+            work_dir.mkdir()
+            history_dir.mkdir()
+            (work_dir / "AGENTS.md").write_text("# Project Rules\n\nKeep this.", encoding="utf-8")
+            (data_dir / "projects").mkdir(parents=True)
+            (data_dir / "dir_history.json").write_text(json.dumps({"codex-a": [str(history_dir)]}))
+
+            registry = {
+                "version": 2,
+                "agents": {
+                    "codex-a": {"type": "codex", "provider": "cc_connect", "work_dir": str(work_dir),
+                                 "capabilities": [], "labels": []},
+                },
+            }
+            bindings = {"cc_connect": {"codex-a": {"data_dir": str(data_dir)}}, "cdp": {}}
+            old_reg = hub.REGISTRY_PATH
+            old_bind = hub.BINDINGS_PATH
+            reg_path = Path(tmpdir) / "registry.json"
+            bind_path = Path(tmpdir) / "bindings.json"
+            reg_path.write_text(json.dumps(registry))
+            bind_path.write_text(json.dumps(bindings))
+            hub.REGISTRY_PATH = reg_path
+            hub.BINDINGS_PATH = bind_path
+            try:
+                args = hub.parse_args(["bootstrap", "context", "--write", "--scope", "workdirs"])
+                result = hub.cmd_bootstrap_context(args)
+                self.assertEqual(result, 0)
+                content = (work_dir / "AGENTS.md").read_text(encoding="utf-8")
+                self.assertIn("# Project Rules", content)
+                self.assertIn("cc-relay-hub:begin", content)
+                self.assertTrue((history_dir / "AGENTS.md").exists())
+            finally:
+                hub.REGISTRY_PATH = old_reg
+                hub.BINDINGS_PATH = old_bind
+
+    def test_legacy_generated_context_is_replaced_not_appended(self):
+        merged = hub._merge_context_block(
+            "# cc-relay-hub Agent Context\n\nold generated body\n",
+            "# cc-relay-hub Agent Context\n\nnew generated body\n",
+        )
+        self.assertEqual(merged.count("cc-relay-hub Agent Context"), 1)
+        self.assertNotIn("old generated body", merged)
+        self.assertIn("new generated body", merged)
 
 
 def _make_bindings(registry):

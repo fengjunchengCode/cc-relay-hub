@@ -36,8 +36,16 @@ class BuildRelayPromptTest(unittest.TestCase):
 
     def test_includes_protocol_instructions(self):
         prompt = build_relay_prompt(_make_envelope())
-        self.assertIn("Relay protocol:", prompt)
+        self.assertIn("Relay protocol (mandatory):", prompt)
         self.assertIn("start your final response", prompt)
+
+    def test_protocol_overrides_only_reply_requests(self):
+        envelope = _make_envelope()
+        envelope.body = "Please only reply pong."
+        prompt = build_relay_prompt(envelope)
+        self.assertIn("Do not omit the marker", prompt)
+        self.assertIn('even if the task asks you to "only reply"', prompt)
+        self.assertIn("put the terse answer after the marker", prompt)
 
 
 class ExtractReplyFromTranscriptTest(unittest.TestCase):

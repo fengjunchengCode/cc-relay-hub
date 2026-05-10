@@ -10,7 +10,15 @@ After adding a new cc-connect instance, run:
 cc-relay-hub bootstrap
 ```
 
-This scans local cc-connect config files, writes registry/bindings, verifies connectivity, and generates agent context files.
+This scans local cc-connect config files, writes registry/bindings, verifies connectivity, and installs cc-relay-hub context blocks into agent memory files.
+
+Context bootstrap mirrors cc-connect's memory-file model:
+
+- global memory files such as `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`
+- each configured agent `work_dir`
+- cc-connect `work_dir_override` and `dir_history.json` directories created by `/dir`
+
+Existing project instruction files are preserved. cc-relay-hub only updates the block between `<!-- cc-relay-hub:begin -->` and `<!-- cc-relay-hub:end -->`.
 
 ## cc-connect Webhook Setup
 
@@ -55,6 +63,16 @@ Default bind address:
 ```bash
 cc-relay-hub list
 ```
+
+## Stale Claude Code Sessions
+
+If a Claude Code backed cc-connect bot starts returning `(empty response)` or `(空响应)` immediately after a cc-connect restart, check the cc-connect log for:
+
+```text
+No conversation found with session ID
+```
+
+That means cc-connect is trying to resume a Claude Code conversation ID that Claude no longer has. Start a fresh chat session for that bot with `/new`, or clear the stale `agent_session_id` from the bot's active session file under `~/.cc-connect/sessions/` and restart that cc-connect instance.
 
 ## Waiting for Events
 

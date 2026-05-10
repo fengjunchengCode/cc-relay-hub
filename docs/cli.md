@@ -17,9 +17,10 @@ The wrapper command is `cc-relay-hub`. It invokes `hub.py` with Python 3.9+.
 | Command | Description |
 | --- | --- |
 | `cc-relay-hub bootstrap` | Scan configs, write registry/bindings, verify connectivity |
-| `cc-relay-hub bootstrap context --print` | Print generated agent context files |
-| `cc-relay-hub bootstrap context --check` | Check whether generated context files are up to date |
-| `cc-relay-hub bootstrap context --write` | Generate AGENTS.md and agent-native context files |
+| `cc-relay-hub bootstrap context --print` | Print generated agent context blocks |
+| `cc-relay-hub bootstrap context --check` | Check global and workdir context blocks |
+| `cc-relay-hub bootstrap context --write` | Install/update global memory and known workdir context blocks |
+| `cc-relay-hub bootstrap context --write --scope cwd` | Write only the current directory context files |
 | `cc-relay-hub list` | Discover configured local agents |
 | `cc-relay-hub list --format json` | Return machine-readable peer data for agent skills |
 | `cc-relay-hub list --group <group>` | List only agents in a group |

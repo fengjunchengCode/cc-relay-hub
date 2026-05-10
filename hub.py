@@ -58,6 +58,13 @@ def parse_args(argv):
     ctx_parser.add_argument("--write", action="store_true", help="Write context files to disk")
     ctx_parser.add_argument("--check", action="store_true", help="Check if context files are up to date")
     ctx_parser.add_argument("--print", action="store_true", dest="print_mode", help="Print context to stdout")
+    ctx_parser.add_argument(
+        "--scope",
+        choices=["cwd", "global", "workdirs", "all"],
+        default="all",
+        help="Where to install context files (default: all)",
+    )
+    ctx_parser.add_argument("--project", default=None, help=argparse.SUPPRESS)
     subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
 
     # Groups management
@@ -226,7 +233,12 @@ def bootstrap_registry_and_bindings():
             name = project.get("name", "unknown")
             agent_cfg = project.get("agent", {})
             options = agent_cfg.get("options", {})
-            session_key = session_map.get(name, "") or legacy.get("session_key", "")
+            legacy = legacy_agents.get(name, {})
+            data_dir = config.get("data_dir", str(DATA_DIR))
+            if isinstance(data_dir, str):
+                data_dir = os.path.expanduser(data_dir)
+            else:
+                data_dir = str(DATA_DIR)
             registry["agents"][name] = {
                 "type": agent_cfg.get("type", "unknown"),
                 "provider": "cc_connect",
@@ -234,9 +246,10 @@ def bootstrap_registry_and_bindings():
                 "capabilities": ["message.send", "history.read", "session.control"],
                 "labels": [],
             }
-            legacy = legacy_agents.get(name, {})
+            session_key = session_map.get(name, "") or legacy.get("session_key", "")
             bindings["cc_connect"][name] = {
                 "config_path": str(config_path),
+                "data_dir": data_dir,
                 "webhook_host": "127.0.0.1",
                 "webhook_port": int(webhook.get("port", 0) or legacy.get("webhook_port", 0)),
                 "webhook_path": webhook.get("path", "/hook") or legacy.get("webhook_path", "/hook"),
@@ -758,6 +771,8 @@ def _routing_contract_lines(agent_name=None):
         "Use cc-connect relay only for cc-connect's group-chat relay feature after a chat has been bound with /bind.",
         "Do not use `cc-connect relay send` for direct/private agent-to-agent delegation.",
         "If the user says \"send to codex\" or \"ask codex\", default to cc-relay-hub.",
+        "If you receive `[cc-relay request_id=...]`, that message is addressed to you. Never answer `NO_REPLY` or an empty response.",
+        "Even if the task says \"only reply X\", put `X` after the required `[cc-relay reply_to=...]` marker.",
         "",
     ]
 
@@ -885,56 +900,230 @@ _CONTEXT_ADAPTERS = [
 ]
 
 
+CC_RELAY_CONTEXT_START = "<!-- cc-relay-hub:begin -->"
+CC_RELAY_CONTEXT_END = "<!-- cc-relay-hub:end -->"
+
+
+def _context_block(content):
+    return "\n%s\n%s\n%s\n" % (
+        CC_RELAY_CONTEXT_START,
+        content.strip(),
+        CC_RELAY_CONTEXT_END,
+    )
+
+
+def _merge_context_block(existing, content):
+    block = _context_block(content)
+    start = existing.find(CC_RELAY_CONTEXT_START)
+    if start >= 0:
+        end = existing.find(CC_RELAY_CONTEXT_END, start)
+        if end >= 0:
+            end += len(CC_RELAY_CONTEXT_END)
+            prefix = existing[:start].rstrip()
+            suffix = existing[end:].lstrip("\n")
+            if prefix and suffix:
+                return prefix + block + suffix
+            if prefix:
+                return prefix + block
+            if suffix:
+                return block.lstrip("\n") + suffix
+            return block.lstrip("\n")
+        prefix = existing[:start].rstrip()
+        return (prefix + block if prefix else block.lstrip("\n"))
+
+    stripped = existing.lstrip()
+    if stripped.startswith("# cc-relay-hub Agent Context") or stripped.startswith("# cc-relay-hub\n"):
+        return block.lstrip("\n")
+
+    if existing.strip():
+        return existing.rstrip() + block
+    return block.lstrip("\n")
+
+
+def _agent_memory_spec(agent_type):
+    """Return (project filename, global memory path) mirroring cc-connect agents."""
+    agent_type = (agent_type or "").lower()
+    home = Path.home()
+    if agent_type in ("claudecode", "claude"):
+        return "CLAUDE.md", home / ".claude" / "CLAUDE.md"
+    if agent_type == "codex":
+        codex_home = Path(os.environ.get("CODEX_HOME") or (home / ".codex"))
+        return "AGENTS.md", codex_home / "AGENTS.md"
+    if agent_type == "gemini":
+        return "GEMINI.md", home / ".gemini" / "GEMINI.md"
+    if agent_type == "opencode":
+        return "OPENCODE.md", home / ".opencode" / "OPENCODE.md"
+    if agent_type == "iflow":
+        return "IFLOW.md", home / ".iflow" / "IFLOW.md"
+    if agent_type == "kimi":
+        return "AGENTS.md", home / ".kimi" / "AGENTS.md"
+    if agent_type == "qoder":
+        return "AGENTS.md", home / ".qoder" / "AGENTS.md"
+    if agent_type == "pi":
+        return "AGENTS.md", home / ".pi" / "AGENTS.md"
+    if agent_type == "cursor":
+        return ".cursorrules", None
+    return "AGENTS.md", None
+
+
+def _read_json_file(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _cc_connect_data_dir(bindings, agent_name):
+    binding = bindings.get("cc_connect", {}).get(agent_name, {})
+    data_dir = binding.get("data_dir") or str(DATA_DIR)
+    return Path(os.path.expanduser(data_dir))
+
+
+def _cc_connect_project_dirs(registry, bindings, agent_name):
+    agent = registry.get("agents", {}).get(agent_name, {})
+    dirs = []
+
+    def add_dir(value):
+        if not value:
+            return
+        path = Path(os.path.expanduser(str(value)))
+        if not path.is_absolute():
+            path = path.resolve()
+        if path.exists() and path.is_dir():
+            clean = str(path)
+            if clean not in dirs:
+                dirs.append(clean)
+
+    add_dir(agent.get("work_dir"))
+
+    data_dir = _cc_connect_data_dir(bindings, agent_name)
+    state = _read_json_file(data_dir / "projects" / ("%s.state.json" % agent_name), {})
+    add_dir(state.get("work_dir_override"))
+    for value in (state.get("workspace_dir_overrides") or {}).values():
+        add_dir(value)
+
+    history = _read_json_file(data_dir / "dir_history.json", {})
+    for value in history.get(agent_name, []) or []:
+        add_dir(value)
+
+    return dirs
+
+
+def _context_target_records(registry, bindings, scope, project_filter=None):
+    agents = registry.get("agents", {})
+    records = []
+    seen = set()
+
+    def add_record(path, generator, agent_name, label):
+        if not path:
+            return
+        key = (str(path), agent_name or "", label)
+        if key in seen:
+            return
+        seen.add(key)
+        records.append({
+            "path": Path(path),
+            "generator": generator,
+            "agent_name": agent_name,
+            "label": label,
+        })
+
+    selected = sorted(agents.keys())
+    if project_filter:
+        selected = [name for name in selected if name == project_filter]
+
+    if scope in ("cwd",):
+        project_dir = Path.cwd()
+        for filename, generator, per_agent in _CONTEXT_ADAPTERS:
+            agent_names = selected if per_agent else [None]
+            for agent_name in agent_names:
+                if not per_agent:
+                    out_path = project_dir / filename
+                elif len(agents) > 1:
+                    out_path = project_dir / ".cc-relay-hub" / agent_name / filename
+                else:
+                    out_path = project_dir / filename
+                add_record(out_path, generator, agent_name, "cwd")
+
+    if scope in ("global", "all"):
+        global_paths = {}
+        for agent_name in selected:
+            agent = agents.get(agent_name, {})
+            _, global_path = _agent_memory_spec(agent.get("type", ""))
+            if not global_path:
+                continue
+            # Global memory files are shared by all agents of the same CLI.
+            # Do not stamp a specific agent identity into shared memory.
+            global_paths[str(global_path)] = global_path
+        for global_path in global_paths.values():
+            add_record(global_path, _generate_agents_md, None, "global")
+
+    if scope in ("workdirs", "all"):
+        by_path = {}
+        for agent_name in selected:
+            agent = agents.get(agent_name, {})
+            filename, _ = _agent_memory_spec(agent.get("type", ""))
+            for work_dir in _cc_connect_project_dirs(registry, bindings, agent_name):
+                path = Path(work_dir) / filename
+                by_path.setdefault(str(path), {"path": path, "agents": []})["agents"].append(agent_name)
+
+        for item in by_path.values():
+            agent_names = item["agents"]
+            agent_name = agent_names[0] if len(agent_names) == 1 else None
+            generator = _generate_cursor_rules if item["path"].name == ".cursorrules" else _generate_agents_md
+            add_record(item["path"], generator, agent_name, "workdir")
+
+    return records
+
+
 def cmd_bootstrap_context(args):
     registry, bindings = ensure_registry_and_bindings()
-    agents = registry.get("agents", {})
     do_write = getattr(args, "write", False)
     do_check = getattr(args, "check", False)
     do_print = getattr(args, "print_mode", False)
+    scope = getattr(args, "scope", "all") or "all"
+    project_filter = getattr(args, "project", None)
 
     if not do_write and not do_check and not do_print:
         do_print = True
 
-    project_dir = Path.cwd()
     results = []
 
-    for filename, generator, per_agent in _CONTEXT_ADAPTERS:
-        agent_names = sorted(agents.keys()) if per_agent else [None]
-        for agent_name in agent_names:
-            content = generator(registry, bindings, agent_name)
-            if content is None:
-                continue
+    for record in _context_target_records(registry, bindings, scope, project_filter):
+        out_path = record["path"]
+        content = record["generator"](registry, bindings, record["agent_name"])
+        if content is None:
+            continue
 
-            # Determine output path
-            if not per_agent:
-                out_path = project_dir / filename
-            elif len(agents) > 1:
-                out_path = project_dir / ".cc-relay-hub" / agent_name / filename
-            else:
-                out_path = project_dir / filename
+        if do_print:
+            print("=== %s (%s) ===" % (out_path, record["label"]))
+            print(_merge_context_block("", content).rstrip())
+            print()
+            continue
 
-            if do_print:
-                print("=== %s ===" % out_path)
-                print(content)
-                print()
-                continue
+        if do_check:
+            exists = out_path.exists()
+            current = out_path.read_text(encoding="utf-8") if exists else ""
+            desired = _merge_context_block(current, content)
+            up_to_date = exists and current == desired
+            status = "ok" if up_to_date else ("missing" if not exists else "outdated")
+            results.append((str(out_path), status))
+            continue
 
-            if do_check:
-                exists = out_path.exists()
-                current = out_path.read_text(encoding="utf-8") if exists else ""
-                up_to_date = exists and current.strip() == content.strip()
-                status = "ok" if up_to_date else ("missing" if not exists else "outdated")
-                results.append((str(out_path), status))
-                continue
+        if do_write:
+            current = out_path.read_text(encoding="utf-8") if out_path.exists() else ""
+            desired = _merge_context_block(current, content)
+            if out_path.exists() and current != desired:
+                backup = out_path.with_suffix(out_path.suffix + ".bak")
+                backup.write_text(current, encoding="utf-8")
 
-            if do_write:
-                if out_path.exists():
-                    backup = out_path.with_suffix(out_path.suffix + ".bak")
-                    backup.write_text(out_path.read_text(encoding="utf-8"), encoding="utf-8")
-
+            if current != desired:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(content, encoding="utf-8")
-                results.append((str(out_path), "written"))
+                out_path.write_text(desired, encoding="utf-8")
+                status = "written"
+            else:
+                status = "ok"
+            results.append((str(out_path), status))
 
     if do_check:
         print("Context file status:")

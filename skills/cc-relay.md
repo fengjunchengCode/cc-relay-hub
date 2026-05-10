@@ -13,7 +13,8 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Discover current peers with `cc-relay-hub list --format json`.
 - Check a target before sending work with `cc-relay-hub info <agent>`.
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
-- When the user says they added a new cc-connect instance, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and auto-generate agent context files (AGENTS.md, CLAUDE.md, etc.).
+- When the user says they added a new cc-connect instance or changed work directories with cc-connect `/dir`, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and refresh global/workdir agent context blocks.
+- When you receive `[cc-relay request_id=...]`, always reply with `[cc-relay reply_to=...]`; never answer `NO_REPLY` or omit the marker because the task says "only reply X".
 
 ## Routing Contract
 

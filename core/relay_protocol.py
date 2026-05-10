@@ -16,12 +16,19 @@ def build_relay_prompt(envelope):
     return "\n".join([
         "[cc-relay request_id=%s]" % envelope.request_id,
         "",
+        "This is a direct cc-relay-hub request addressed to you.",
+        "Mandatory transport rule: your visible final answer must start with the reply marker shown below.",
+        "Do not answer NO_REPLY or an empty response.",
+        "Do not omit the marker even if the task asks you to \"only reply\" with a word or phrase.",
+        "",
+        "Task:",
         envelope.body,
         "",
-        "Relay protocol:",
+        "Relay protocol (mandatory):",
         "When you answer this request, start your final response with exactly this line:",
         "[cc-relay reply_to=%s]" % envelope.request_id,
-        "Then put your answer after that marker. Do not use this marker for any other conversation.",
+        "Then put your answer after that marker. If the task asks for a terse answer, put the terse answer after the marker.",
+        "Do not use this marker for any other conversation.",
     ])
 
 

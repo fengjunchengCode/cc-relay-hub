@@ -37,6 +37,8 @@ When you receive a message containing `[cc-relay request_id=...]`:
 2. Start your final response with: `[cc-relay reply_to=<same_id>]`
 3. Put your answer after that marker line.
 4. Do not use this marker for any other purpose.
+5. Never answer `NO_REPLY` or an empty response to a cc-relay-hub request.
+6. If the task says "only reply X", still put `X` after the required reply marker.
 
 ## Groups
 
