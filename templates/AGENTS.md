@@ -17,9 +17,34 @@ cc-relay-hub groups                 # list groups and members
 cc-relay-hub send <agent> "task description" --wait --timeout 120
 ```
 
-- Delivers via webhook HTTP POST (not platform API).
+- For `cc_connect` agents, delivers via local webhook HTTP POST.
+- For `cdp` agents such as Antigravity, delivers through the local Chrome DevTools Protocol session into the IDE agent chat.
 - `--wait` blocks until the target replies or timeout.
 - Always check `info <agent>` before sending.
+- If `info` shows `Provider: cdp`, still use `cc-relay-hub send <agent> "task" --wait`; do not switch to `cc-connect relay`.
+
+## CDP IDE Agents
+
+CDP-backed agents are IDE windows controlled through localhost CDP. Antigravity commonly appears as `antigravity-ide`.
+
+```bash
+cc-relay-hub info antigravity-ide
+cc-relay-hub cdp status antigravity-ide
+cc-relay-hub send antigravity-ide "task description" --wait --timeout 120
+```
+
+Use diagnostics only when needed:
+
+```bash
+cc-relay-hub cdp probe antigravity-ide
+cc-relay-hub cdp heal antigravity-ide
+cc-relay-hub cdp models antigravity-ide
+cc-relay-hub cdp screenshot antigravity-ide --path /tmp/antigravity.png
+```
+
+- `Last Seen: never` is normal for CDP agents because replies are read from the IDE DOM, not from the hook server.
+- If `send --wait` times out, run `cdp status`, `cdp probe`, and `cdp screenshot` before retrying.
+- Keep CDP ports bound to `127.0.0.1`; never expose the debugging port to a network.
 
 ## Relay (Agent-to-Agent)
 

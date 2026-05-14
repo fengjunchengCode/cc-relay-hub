@@ -99,13 +99,14 @@ class CDPProvider(MessageProvider, ControlProvider):
         if reply is not None:
             # Emit event with content starting at the marker so
             # core/match.py:extract_relay_reply() can match it.
+            request_id = self._pending_request_id
             marker_line = "[cc-relay reply_to=%s]" % self._pending_request_id
             event_content = marker_line + "\n" + reply
             self._pending_request_id = None
             return [
                 RelayEvent(
                     event_type="message.reply",
-                    request_id=self._pending_request_id,
+                    request_id=request_id,
                     agent_id=self.agent_id,
                     content=event_content,
                     timestamp=time.time(),

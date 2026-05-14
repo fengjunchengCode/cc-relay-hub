@@ -65,7 +65,9 @@ cc-relay-hub watch --loop --format text   # continuous: stream events as they ar
 # CDP (Electron IDE)
 cc-relay-hub cdp status <agent>
 cc-relay-hub cdp models <agent>
-cc-relay-hub cdp screenshot <agent>
+cc-relay-hub cdp probe <agent>
+cc-relay-hub cdp heal <agent>
+cc-relay-hub cdp screenshot <agent> --path /tmp/ide.png
 ```
 
 ## Recommended flow
@@ -76,13 +78,36 @@ cc-relay-hub cdp screenshot <agent>
 4. Use `--wait` only when you need serialized request/reply flow on that target session.
 5. To check for incoming events, use `cc-relay-hub watch` (one-shot) or `cc-relay-hub watch --loop`.
 
+## CDP IDE agent flow
+
+CDP-backed IDE agents, including Antigravity, are first-class `send` targets:
+
+```bash
+cc-relay-hub list --format json
+cc-relay-hub info antigravity-ide
+cc-relay-hub cdp status antigravity-ide
+cc-relay-hub send antigravity-ide "inspect this project and report findings" --wait --timeout 120
+```
+
+Provider-specific facts:
+
+- `Provider: cdp` means the hub controls an Electron IDE through localhost CDP, not a cc-connect webhook.
+- `Session` may be empty and `Last Seen: never`; this is normal for CDP because replies are read from the visible IDE transcript.
+- Use the exact agent name from `list`; common Antigravity name is `antigravity-ide`.
+- If `send --wait` fails or times out, run `cc-relay-hub cdp status`, `cc-relay-hub cdp probe`, `cc-relay-hub cdp heal`, and `cc-relay-hub cdp screenshot --path /tmp/antigravity.png` before retrying.
+- Do not use `cc-connect relay send` for Antigravity/CDP delegation.
+
 ## CRITICAL: How delivery works
 
-`cc-relay-hub send` delivers via **HTTP POST to cc-connect webhook** (not Feishu API).
+`cc-relay-hub send` is provider-aware:
+
+- For `cc_connect` agents it delivers via **HTTP POST to cc-connect webhook** (not Feishu API).
 - `send codex-bot "msg"` → POST to `http://127.0.0.1:9112/hook`
 - `send my-project "msg"` → POST to `http://127.0.0.1:9110/hook`
 - No echo filter — the message is processed by cc-connect and forwarded to the agent.
 - Do NOT use Feishu API directly to send messages to bots (echo filter drops bot's own messages).
+- For `cdp` agents it delivers via **Chrome DevTools Protocol** to the local IDE window and reads the reply from the IDE DOM transcript.
+- `send antigravity-ide "msg" --wait` → writes into Antigravity's Agent chat and waits for a relay marker in the visible response.
 
 ## CRITICAL: Never use shell polling loops
 
@@ -100,4 +125,5 @@ Instead use:
 
 - Reply monitoring depends on the local hook server and `message.sent` hooks being configured in cc-connect.
 - If `info` or `list` shows `session_key` as empty or `none`, send one normal chat message to that bot in its own chat window, then rerun discovery.
+- For CDP agents, an empty `session_key` is expected; use `cc-relay-hub cdp status <agent>` for health instead.
 - The hook server's long-poll endpoint (`GET /events/longpoll`) holds the HTTP connection open until events arrive. This is the correct way to wait for events without polling.

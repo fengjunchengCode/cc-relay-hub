@@ -49,9 +49,9 @@ def extract_reply_from_transcript(text, request_id):
     for match in _CDP_MARKER_RE.finditer(text):
         if match.group(1) != request_id:
             continue
-        after = text[match.end():].lstrip("\r\n")
+        after = text[match.end():].lstrip()
         # Skip prompt markers — they're followed by the instruction text
-        if after.startswith(_INSTRUCTION_PREFIX):
+        if after.startswith(_INSTRUCTION_PREFIX) or _INSTRUCTION_PREFIX in after[:200]:
             continue
         last_match = match
     if last_match is not None:

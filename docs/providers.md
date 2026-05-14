@@ -77,6 +77,22 @@ Example binding:
 }
 ```
 
+Agents use the same request path for CDP targets as for webhook targets:
+
+```bash
+cc-relay-hub info antigravity-ide
+cc-relay-hub cdp status antigravity-ide
+cc-relay-hub send antigravity-ide "Open the project and inspect the failing workflow" --wait --timeout 120
+```
+
+For CDP agents, `Session` may be empty and `Last Seen` may remain `never`; this is expected because replies are read from the IDE DOM transcript rather than from the hook server. If a send times out, inspect the IDE state before retrying:
+
+```bash
+cc-relay-hub cdp probe antigravity-ide
+cc-relay-hub cdp heal antigravity-ide
+cc-relay-hub cdp screenshot antigravity-ide --path /tmp/antigravity.png
+```
+
 ## CDP Safety
 
 CDP can control the target IDE window. Keep debugging ports bound to `127.0.0.1`, do not expose them to a network, and close the IDE debugging session when not needed.

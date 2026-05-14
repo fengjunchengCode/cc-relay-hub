@@ -832,7 +832,9 @@ def _generate_claude_md(registry, bindings, agent_name):
     lines.append("```bash")
     lines.append("cd %s" % HUB_DIR)
     lines.append("python3 hub.py list")
+    lines.append("python3 hub.py info <agent>")
     lines.append("python3 hub.py send <agent> \"message\" --wait --timeout 120")
+    lines.append("python3 hub.py cdp status <cdp-agent>")
     lines.append("python3 hub.py groups")
     lines.append("python3 hub.py relay <from> <to> \"message\"")
     lines.append("```\n")
@@ -848,12 +850,31 @@ def _generate_claude_md(registry, bindings, agent_name):
         if name == agent_name:
             continue
         a = registry["agents"][name]
-        lines.append("- **%s** (%s)" % (name, a.get("type", "?")))
+        provider = a.get("provider", "?")
+        lines.append("- **%s** (%s, provider=%s)" % (name, a.get("type", "?"), provider))
+
+    cdp_agents = [
+        name for name, info in sorted(registry.get("agents", {}).items())
+        if info.get("provider") == "cdp" and name != agent_name
+    ]
+    if cdp_agents:
+        lines.append("\n## CDP IDE Agents\n")
+        lines.append("CDP-backed IDE agents are still contacted with `send --wait`; the hub writes into the IDE Agent chat through localhost CDP and reads the visible transcript.")
+        lines.append("")
+        lines.append("```bash")
+        lines.append("python3 hub.py info %s" % cdp_agents[0])
+        lines.append("python3 hub.py cdp status %s" % cdp_agents[0])
+        lines.append("python3 hub.py send %s \"task\" --wait --timeout 120" % cdp_agents[0])
+        lines.append("```")
+        lines.append("")
+        lines.append("- Empty `Session` and `Last Seen: never` are normal for CDP agents.")
+        lines.append("- If a CDP send times out, run `python3 hub.py cdp probe <agent>`, `python3 hub.py cdp heal <agent>`, and `python3 hub.py cdp screenshot <agent> --path /tmp/ide.png` before retrying.")
+        lines.append("- Do not use `cc-connect relay send` for Antigravity/CDP delegation.")
 
     # Key facts
     lines.append("\n## Key Facts\n")
-    lines.append("- Send via webhook (not platform API). No echo filter.")
-    lines.append("- CDP agents use virtual session key `cdp:<agent_name>`")
+    lines.append("- `send` is provider-aware: cc-connect agents use local webhook HTTP POST; CDP agents use localhost Chrome DevTools Protocol.")
+    lines.append("- CDP agents use virtual session key `cdp:<agent_name>`.")
     lines.append("- Hook-server long-poll: `GET http://127.0.0.1:9120/events/longpoll`")
     lines.append("- When receiving relay markers, reply with the same marker.")
     return "\n".join(lines)

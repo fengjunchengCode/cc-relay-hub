@@ -41,23 +41,29 @@ class AntigravityBackend(ElectronCDPBackend):
         """Focus the bottom-right chat input (not search bar)."""
         return """
         (function() {
-            var inputs = document.querySelectorAll('[role="textbox"]');
-            for (var inp of inputs) {
+            var panel = document.querySelector('.antigravity-agent-side-panel');
+            var scoped = panel ? panel.querySelectorAll('[role="textbox"]') : [];
+            for (var inp of scoped) {
                 var rect = inp.getBoundingClientRect();
-                if (rect.y > 600 && rect.width > 200) {
+                var label = inp.getAttribute('aria-label') || inp.getAttribute('placeholder') || '';
+                if (rect.width > 150 && rect.height > 20 && (label.includes('Message') || rect.x > 900)) {
                     inp.focus();
                     inp.textContent = '';
-                    inp.dispatchEvent(new Event('input', {bubbles: true}));
+                    inp.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward'}));
                     return "FOCUSED";
                 }
             }
-            // Fallback: try any visible textbox
-            var input = document.querySelector('[role="textbox"]');
-            if (!input) return "NO_INPUT";
-            input.focus();
-            input.textContent = '';
-            input.dispatchEvent(new Event('input', {bubbles: true}));
-            return "FOCUSED_FALLBACK";
+            var inputs = document.querySelectorAll('[role="textbox"]');
+            for (var inp of inputs) {
+                var rect = inp.getBoundingClientRect();
+                if (rect.x > 900 && rect.width > 200) {
+                    inp.focus();
+                    inp.textContent = '';
+                    inp.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward'}));
+                    return "FOCUSED";
+                }
+            }
+            return "NO_INPUT";
         })()
         """
 
@@ -65,15 +71,23 @@ class AntigravityBackend(ElectronCDPBackend):
         """Check if the chat input is empty (= message was sent)."""
         return """
         (function() {
-            var inputs = document.querySelectorAll('[role="textbox"]');
-            for (var inp of inputs) {
+            var panel = document.querySelector('.antigravity-agent-side-panel');
+            var scoped = panel ? panel.querySelectorAll('[role="textbox"]') : [];
+            for (var inp of scoped) {
                 var rect = inp.getBoundingClientRect();
-                if (rect.y > 600 && rect.width > 200) {
+                var label = inp.getAttribute('aria-label') || inp.getAttribute('placeholder') || '';
+                if (rect.width > 150 && rect.height > 20 && (label.includes('Message') || rect.x > 900)) {
                     return inp.textContent.length === 0 ? 'SENT' : 'NOT_SENT';
                 }
             }
-            var input = document.querySelector('[role="textbox"]');
-            return input && input.textContent.length === 0 ? 'SENT' : 'NOT_SENT';
+            var inputs = document.querySelectorAll('[role="textbox"]');
+            for (var inp of inputs) {
+                var rect = inp.getBoundingClientRect();
+                if (rect.x > 900 && rect.width > 200) {
+                    return inp.textContent.length === 0 ? 'SENT' : 'NOT_SENT';
+                }
+            }
+            return 'NOT_SENT';
         })()
         """
 

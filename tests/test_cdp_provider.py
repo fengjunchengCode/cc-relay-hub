@@ -93,6 +93,7 @@ class CDPProviderPollEventsTest(unittest.TestCase):
         events = provider.poll_events()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].event_type, "message.reply")
+        self.assertEqual(events[0].request_id, "req-123")
         # Content should start with the marker so match.py can extract it
         self.assertTrue(events[0].content.startswith("[cc-relay reply_to=req-123]"))
         self.assertIn("The fix is done.", events[0].content)

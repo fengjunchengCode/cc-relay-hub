@@ -44,6 +44,16 @@ The wrapper command is `cc-relay-hub`. It invokes `hub.py` with Python 3.9+.
 | `cc-relay-hub cdp probe <agent>` | Print a DOM probe for diagnostics |
 | `cc-relay-hub cdp heal <agent>` | Run selector self-healing for chat input |
 
+CDP agents are normal `send` targets:
+
+```bash
+cc-relay-hub info antigravity-ide
+cc-relay-hub cdp status antigravity-ide
+cc-relay-hub send antigravity-ide "task" --wait --timeout 120
+```
+
+For CDP agents, an empty `Session` or `Last Seen: never` is expected; use `cdp status/probe/heal/screenshot` for IDE-side diagnostics.
+
 ## Agent Resolution
 
 `send`, `info`, and `relay` support exact and fuzzy agent names:

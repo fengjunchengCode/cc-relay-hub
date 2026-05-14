@@ -110,6 +110,19 @@ class ExtractReplyFromTranscriptTest(unittest.TestCase):
         result = extract_reply_from_transcript(text, "req-123")
         self.assertEqual(result, "The fix is done.")
 
+    def test_prompt_marker_with_indented_instruction_is_ignored(self):
+        """CDP transcript may preserve prompt indentation after the example marker."""
+        text = (
+            "[cc-relay request_id=req-123]\n"
+            "Relay protocol:\n"
+            "[cc-relay reply_to=req-123]\n"
+            "    Then put your answer after that marker. If the task asks for a terse answer, put the terse answer after the marker.\n"
+            "Do not use this marker for any other conversation.\n\n"
+            "[cc-relay reply_to=req-123]\nActual reply."
+        )
+        result = extract_reply_from_transcript(text, "req-123")
+        self.assertEqual(result, "Actual reply.")
+
     def test_truncates_at_ui_boundary(self):
         """Reply followed by UI chrome (timestamps, buttons) is truncated."""
         text = (

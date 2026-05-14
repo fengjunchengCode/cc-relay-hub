@@ -92,9 +92,20 @@ Useful commands:
 
 ```bash
 cc-relay-hub cdp status <agent>
+cc-relay-hub send <agent> "task" --wait --timeout 120
 cc-relay-hub cdp screenshot <agent>
 cc-relay-hub cdp probe <agent>
 ```
+
+For Antigravity, use the discovered agent name from `cc-relay-hub list --format json`; common local setups use `antigravity-ide`.
+
+```bash
+cc-relay-hub info antigravity-ide
+cc-relay-hub cdp status antigravity-ide
+cc-relay-hub send antigravity-ide "Summarize the current workspace state" --wait --timeout 120
+```
+
+`Last Seen: never` is not a failure for CDP agents. It means the target does not use the hook server path; replies are matched from the IDE transcript. If a CDP send fails, run `cdp probe`, `cdp heal`, and `cdp screenshot --path /tmp/antigravity.png` before sending again.
 
 ## Troubleshooting
 

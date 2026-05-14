@@ -576,6 +576,32 @@ class BootstrapContextTest(unittest.TestCase):
                 hub.REGISTRY_PATH = old_reg
                 hub.BINDINGS_PATH = old_bind
 
+    def test_generated_agents_context_explains_cdp_targets(self):
+        registry = _make_registry({})
+        content = hub._generate_agents_md(registry, {"cc_connect": {}, "cdp": {}}, None)
+
+        self.assertIn("CDP IDE Agents", content)
+        self.assertIn("cc-relay-hub send antigravity-ide", content.replace("<agent>", "antigravity-ide"))
+        self.assertIn("Last Seen: never", content)
+        self.assertIn("Provider: cdp", content)
+
+    def test_generated_claude_context_explains_cdp_targets(self):
+        registry = {
+            "version": 2,
+            "agents": {
+                "claude-a": {"type": "claudecode", "provider": "cc_connect", "work_dir": "/tmp",
+                              "capabilities": [], "labels": []},
+                "antigravity-ide": {"type": "antigravity", "provider": "cdp", "work_dir": "/tmp",
+                                     "capabilities": [], "labels": []},
+            },
+        }
+        content = hub._generate_claude_md(registry, {"cc_connect": {}, "cdp": {}}, "claude-a")
+
+        self.assertIn("CDP IDE Agents", content)
+        self.assertIn("python3 hub.py cdp status antigravity-ide", content)
+        self.assertIn("python3 hub.py send antigravity-ide", content)
+        self.assertIn("Empty `Session` and `Last Seen: never`", content)
+
     def test_global_scope_writes_cc_connect_style_memory_files(self):
         registry = {
             "version": 2,
