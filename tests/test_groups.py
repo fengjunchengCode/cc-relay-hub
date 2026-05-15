@@ -99,7 +99,7 @@ class CheckGroupCompatibilityTest(unittest.TestCase):
     def test_agent_not_in_any_group_is_compatible(self):
         groups = {"g1": {"members": ["agent-a"]}}
         registry = _make_registry(groups)
-        self.assertTrue(hub.check_group_compatibility(registry, "agent-a", "agent-c"))
+        self.assertFalse(hub.check_group_compatibility(registry, "agent-a", "agent-c"))
 
 
 class CmdGroupsListTest(unittest.TestCase):
@@ -363,6 +363,68 @@ class CmdSendGroupTest(unittest.TestCase):
                     Path(rf.name).unlink(missing_ok=True)
                     Path(bf.name).unlink(missing_ok=True)
 
+    def test_send_to_grouped_target_from_ungrouped_sender_fails_before_delivery(self):
+        groups = {
+            "wjt-group": {"members": ["agent-b"]},
+        }
+        registry = _make_registry(groups)
+        bindings = {
+            "cc_connect": {
+                "agent-a": {"webhook_port": 0, "session_key": "feishu:a:u"},
+                "agent-b": {"webhook_port": 0, "session_key": "feishu:b:u"},
+            },
+            "cdp": {},
+        }
+
+        class FakeProvider:
+            def supports_control(self):
+                return False
+
+            def deliver(self, _envelope):
+                class Receipt:
+                    status = "failed"
+                    error = "delivery should not be attempted"
+                    delivered_at = None
+                return Receipt()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as rf:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as bf:
+                with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as sf:
+                    json.dump(registry, rf)
+                    rf.flush()
+                    json.dump(bindings, bf)
+                    bf.flush()
+                    old_reg = hub.REGISTRY_PATH
+                    old_bind = hub.BINDINGS_PATH
+                    old_state = hub.STATE_DB_PATH
+                    old_env = unittest.mock.patch.dict("os.environ", {"CC_PROJECT": "agent-a"})
+                    hub.REGISTRY_PATH = Path(rf.name)
+                    hub.BINDINGS_PATH = Path(bf.name)
+                    hub.STATE_DB_PATH = Path(sf.name)
+                    try:
+                        old_env.start()
+                        args = hub.parse_args(["send", "agent-b", "hello"])
+                        import io
+                        captured = io.StringIO()
+                        old_stdout = sys.stdout
+                        sys.stdout = captured
+                        try:
+                            with unittest.mock.patch.object(hub, "get_provider", return_value=FakeProvider()):
+                                result = hub.cmd_send(args)
+                        finally:
+                            sys.stdout = old_stdout
+                        self.assertEqual(result, 1)
+                        self.assertIn("cross-group send blocked", captured.getvalue())
+                        self.assertNotIn("delivery should not be attempted", captured.getvalue())
+                    finally:
+                        old_env.stop()
+                        hub.REGISTRY_PATH = old_reg
+                        hub.BINDINGS_PATH = old_bind
+                        hub.STATE_DB_PATH = old_state
+                        Path(rf.name).unlink(missing_ok=True)
+                        Path(bf.name).unlink(missing_ok=True)
+                        Path(sf.name).unlink(missing_ok=True)
+
 
 class MutateRegistryGroupsTest(unittest.TestCase):
     def test_atomic_create_and_delete(self):
@@ -411,8 +473,56 @@ class CmdRelayCrossGroupTest(unittest.TestCase):
                 hub.BINDINGS_PATH = Path(bf.name)
                 try:
                     args = hub.parse_args(["relay", "agent-a", "agent-b", "hello"])
-                    result = hub.cmd_relay(args)
+                    import io
+                    captured = io.StringIO()
+                    old_stdout = sys.stdout
+                    sys.stdout = captured
+                    try:
+                        result = hub.cmd_relay(args)
+                    finally:
+                        sys.stdout = old_stdout
                     self.assertEqual(result, 1)
+                    self.assertIn("not in the same group", captured.getvalue())
+                finally:
+                    hub.REGISTRY_PATH = old_reg
+                    hub.BINDINGS_PATH = old_bind
+                    Path(rf.name).unlink(missing_ok=True)
+                    Path(bf.name).unlink(missing_ok=True)
+
+    def test_relay_to_grouped_target_from_ungrouped_sender_rejected(self):
+        groups = {
+            "wjt-group": {"members": ["agent-b"]},
+        }
+        registry = _make_registry(groups)
+        bindings = {
+            "cc_connect": {
+                "agent-a": {"webhook_port": 0, "session_key": "feishu:x:y"},
+                "agent-b": {"webhook_port": 0, "session_key": "feishu:x:z"},
+            },
+            "cdp": {},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as rf:
+            json.dump(registry, rf)
+            rf.flush()
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as bf:
+                json.dump(bindings, bf)
+                bf.flush()
+                old_reg = hub.REGISTRY_PATH
+                old_bind = hub.BINDINGS_PATH
+                hub.REGISTRY_PATH = Path(rf.name)
+                hub.BINDINGS_PATH = Path(bf.name)
+                try:
+                    args = hub.parse_args(["relay", "agent-a", "agent-b", "hello"])
+                    import io
+                    captured = io.StringIO()
+                    old_stdout = sys.stdout
+                    sys.stdout = captured
+                    try:
+                        result = hub.cmd_relay(args)
+                    finally:
+                        sys.stdout = old_stdout
+                    self.assertEqual(result, 1)
+                    self.assertIn("not in the same group", captured.getvalue())
                 finally:
                     hub.REGISTRY_PATH = old_reg
                     hub.BINDINGS_PATH = old_bind
@@ -571,6 +681,7 @@ class BootstrapContextTest(unittest.TestCase):
                 self.assertEqual(content.count("## Available Peers"), 1)
                 self.assertEqual(content.count("## Message Routing Contract"), 1)
                 self.assertIn("Do not use `cc-connect relay send`", content)
+                self.assertIn("Do not send messages across groups", content)
             finally:
                 os.chdir(str(old_cwd))
                 hub.REGISTRY_PATH = old_reg

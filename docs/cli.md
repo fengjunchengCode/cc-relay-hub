@@ -65,3 +65,4 @@ For CDP agents, an empty `Session` or `Last Seen: never` is expected; use `cdp s
 5. Ambiguous matches ask for an exact name.
 
 This lets commands such as `send codex "task"` choose the Codex-like agent in the same group when that is unambiguous.
+Exact names do not bypass group isolation: `send` and `relay` reject cross-group targets, including ungrouped-to-named-group sends.

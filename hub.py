@@ -403,8 +403,10 @@ def get_group_members(registry, group_name):
 def check_group_compatibility(registry, sender, target):
     sender_groups = set(get_agent_groups(registry, sender))
     target_groups = set(get_agent_groups(registry, target))
-    if not sender_groups or not target_groups:
+    if not sender_groups and not target_groups:
         return True
+    if not sender_groups or not target_groups:
+        return False
     return bool(sender_groups & target_groups)
 
 
@@ -770,6 +772,7 @@ def _routing_contract_lines(agent_name=None):
         "",
         "Use cc-connect relay only for cc-connect's group-chat relay feature after a chat has been bound with /bind.",
         "Do not use `cc-connect relay send` for direct/private agent-to-agent delegation.",
+        "Do not send messages across groups. Treat ungrouped agents as separate from named groups; exact agent names do not bypass group isolation.",
         "If the user says \"send to codex\" or \"ask codex\", default to cc-relay-hub.",
         "If you receive `[cc-relay request_id=...]`, that message is addressed to you. Never answer `NO_REPLY` or an empty response.",
         "Even if the task says \"only reply X\", put `X` after the required `[cc-relay reply_to=...]` marker.",
@@ -1192,11 +1195,8 @@ def cmd_send(args):
                 agent["name"], filter_group, ", ".join(members)))
             return 1
 
-    provider = get_provider(agent)
-    state = StateStore(str(STATE_DB_PATH))
-    session_key = agent["binding"].get("session_key", "")
-
-    # Group isolation: reject cross-group sends when both sides have groups.
+    # Group isolation: reject sends across group boundaries. Ungrouped agents
+    # can talk to other ungrouped agents, but not to named groups.
     if sender and not filter_group:
         if not check_group_compatibility(registry, sender, agent["name"]):
             sender_g = get_agent_groups(registry, sender)
@@ -1204,6 +1204,10 @@ def cmd_send(args):
             print("Error: cross-group send blocked (%s in [%s] -> %s in [%s])" % (
                 sender, ", ".join(sender_g), agent["name"], ", ".join(target_g)))
             return 1
+
+    provider = get_provider(agent)
+    state = StateStore(str(STATE_DB_PATH))
+    session_key = agent["binding"].get("session_key", "")
 
     if agent["provider"] != "cdp" and not session_key:
         print("Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"])
@@ -1492,10 +1496,11 @@ def cmd_relay(args):
     from_name = from_agent["name"]
     to_name = to_agent["name"]
 
-    # Check same group
+    # Check same group. Ungrouped agents can talk to other ungrouped agents,
+    # but not to agents in a named group.
     from_groups = set(get_agent_groups(registry, from_name))
     to_groups = set(get_agent_groups(registry, to_name))
-    if from_groups and to_groups and not (from_groups & to_groups):
+    if not check_group_compatibility(registry, from_name, to_name):
         print("Error: '%s' and '%s' are not in the same group." % (from_name, to_name))
         print("  %s groups: %s" % (from_name, ", ".join(from_groups) or "-"))
         print("  %s groups: %s" % (to_name, ", ".join(to_groups) or "-"))

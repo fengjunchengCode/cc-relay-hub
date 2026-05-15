@@ -73,6 +73,7 @@ Check your group: `cc-relay-hub list --format json`
 ## Rules
 
 - Never hardcode agent names. Discover with `cc-relay-hub list`.
+- Do not send messages across groups. Treat ungrouped agents as separate from named groups; exact agent names do not bypass group isolation.
 - Never use shell polling loops (`tail -f`, `while true`, `sleep`).
 - Use `cc-relay-hub send --wait` for request/reply.
 - Check agent health before sending work.
