@@ -71,20 +71,16 @@ class HookHandlerTest(unittest.TestCase):
         self.assertEqual(result["status"], "matched")
         self.assertEqual(result["notify"]["status"], "sent")
         self.assertEqual(len(calls), 1)
-        self.assertEqual(
-            calls[0][0],
-            [
-                "cc-connect",
-                "--config",
-                "/tmp/config-codex.toml",
-                "send",
-                "-p",
-                "codex-bot",
-                "-s",
-                "feishu:origin:u1",
-                "--stdin",
-            ],
-        )
+        self.assertEqual(calls[0][0][1:], [
+            "--config",
+            "/tmp/config-codex.toml",
+            "send",
+            "-p",
+            "codex-bot",
+            "-s",
+            "feishu:origin:u1",
+            "--stdin",
+        ])
         self.assertIn("pong", calls[0][1])
         self.assertNotIn("[cc-relay reply_to=req-1]", calls[0][1])
 

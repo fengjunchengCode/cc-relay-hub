@@ -3,6 +3,13 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "SCRIPT_DIR=%~dp0"
 set "HUB=%SCRIPT_DIR%..\hub.py"
+if not exist "%HUB%" (
+  set "HUB=%USERPROFILE%\.cc-connect\cc-relay-hub\hub.py"
+)
+if not exist "%HUB%" (
+  echo Error: hub.py not found. Expected "%SCRIPT_DIR%..\hub.py" or "%USERPROFILE%\.cc-connect\cc-relay-hub\hub.py". 1>&2
+  exit /b 1
+)
 
 where python3 >nul 2>nul
 if not errorlevel 1 (

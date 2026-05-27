@@ -1,12 +1,63 @@
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const hubDir = path.dirname(new URL(import.meta.url).pathname);
+const hubDir = path.dirname(fileURLToPath(import.meta.url));
 const out = process.env.HOOK_EVENTS_FILE || path.join(hubDir, "hook-events.jsonl");
 const hubScript = path.join(hubDir, "hub.py");
 const PORT = parseInt(process.env.HOOK_PORT || "9120", 10);
+
+function parseCommand(value) {
+  const text = (value || "").trim();
+  if (!text) return null;
+  if (text.startsWith('"')) {
+    const end = text.indexOf('"', 1);
+    if (end > 1) {
+      const command = text.slice(1, end);
+      const rest = text.slice(end + 1).trim();
+      return { command, args: rest ? rest.split(/\s+/) : [] };
+    }
+  }
+  const parts = text.split(/\s+/);
+  return { command: parts[0], args: parts.slice(1) };
+}
+
+function pythonCandidates() {
+  const candidates = [];
+  const envPython = parseCommand(process.env.PYTHON_BIN || "");
+  if (envPython) candidates.push(envPython);
+  if (process.platform === "win32") {
+    candidates.push({ command: "python", args: [] });
+    candidates.push({ command: "py", args: ["-3"] });
+    candidates.push({ command: "python3", args: [] });
+  } else {
+    candidates.push({ command: "python3", args: [] });
+    candidates.push({ command: "python", args: [] });
+  }
+  return candidates;
+}
+
+function canRunPython(candidate) {
+  const checks = [
+    "import sys; assert sys.version_info >= (3, 9); import tomllib",
+    "import sys; assert sys.version_info >= (3, 9); import tomli",
+  ];
+  return checks.some(code => {
+    const result = spawnSync(candidate.command, [...candidate.args, "-c", code], {
+      stdio: "ignore",
+    });
+    return result.status === 0;
+  });
+}
+
+function resolvePython() {
+  for (const candidate of pythonCandidates()) {
+    if (canRunPython(candidate)) return candidate;
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // In-memory event ring buffer + long-poll waiters
@@ -92,7 +143,12 @@ function handleLongPoll(req, res) {
 // Forward hook event to hub.py
 // ---------------------------------------------------------------------------
 function forwardToHub(payload) {
-  const child = spawn("python3", [hubScript, "_on_hook"], {
+  const python = resolvePython();
+  if (!python) {
+    console.error("hub forward error: Python 3.9+ with tomllib or tomli was not found");
+    return;
+  }
+  const child = spawn(python.command, [...python.args, hubScript, "_on_hook"], {
     stdio: ["pipe", "pipe", "pipe"],
   });
 

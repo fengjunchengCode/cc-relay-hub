@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -467,6 +468,18 @@ def _run_cc_connect_send(command, input_text):
     )
 
 
+def _resolve_cc_connect_command():
+    if os.name == "nt":
+        candidates = ["cc-connect.exe", "cc-connect.cmd", "cc-connect"]
+    else:
+        candidates = ["cc-connect", "cc-connect.cmd", "cc-connect.exe"]
+    for candidate in candidates:
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return "cc-connect"
+
+
 def load_bindings(bindings=None):
     if bindings is not None:
         return bindings
@@ -494,7 +507,7 @@ def _send_via_origin_config(origin_project, origin_session, binding, content, ru
         return {"status": "skipped", "reason": "config_missing"}
 
     command = [
-        "cc-connect",
+        _resolve_cc_connect_command(),
         "--config",
         config_path,
         "send",
@@ -504,7 +517,10 @@ def _send_via_origin_config(origin_project, origin_session, binding, content, ru
         origin_session,
         "--stdin",
     ]
-    result = runner(command, content)
+    try:
+        result = runner(command, content)
+    except FileNotFoundError as exc:
+        return {"status": "skipped", "reason": "cc_connect_missing", "error": str(exc)}
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         if _is_retryable_error(stderr):

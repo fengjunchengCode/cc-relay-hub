@@ -36,6 +36,16 @@ class InstallAssetsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("Found", result.stdout)
 
+    def test_install_docs_include_windows_hardening_checkpoints(self):
+        content = (ROOT / "INSTALL.md").read_text(encoding="utf-8")
+
+        self.assertIn("cd /d", content)
+        self.assertIn("where.exe codex", content)
+        self.assertIn("WindowsApps", content)
+        self.assertIn("cc-connect feishu bind", content)
+        self.assertIn("http.proxy=http://127.0.0.1:<port>", content)
+        self.assertIn("verify its webhook port is listening", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,9 +5,20 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import hub  # noqa: E402
+
+
+class CompletedProcessStub(object):
+    def __init__(self, returncode=0, stderr=b""):
+        self.returncode = returncode
+        self.stderr = stderr
 
 
 class WindowsCompatTest(unittest.TestCase):
@@ -102,6 +113,37 @@ class WindowsCompatTest(unittest.TestCase):
 
     def test_windows_cmd_wrapper_exists(self):
         self.assertTrue((ROOT / "bin" / "cc-relay-hub.cmd").exists())
+
+    def test_windows_cmd_wrapper_falls_back_to_installed_hub_path_when_copied(self):
+        content = (ROOT / "bin" / "cc-relay-hub.cmd").read_text(encoding="utf-8")
+
+        self.assertIn('if not exist "%HUB%"', content)
+        self.assertIn(r"%USERPROFILE%\.cc-connect\cc-relay-hub\hub.py", content)
+
+    def test_send_via_origin_config_resolves_cc_connect_cmd_on_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            bin_dir = Path(td)
+            shim = bin_dir / "cc-connect.cmd"
+            shim.write_text("@echo off\r\n", encoding="utf-8")
+            shim.chmod(0o755)
+
+            calls = []
+
+            def runner(command, input_text):
+                calls.append((command, input_text))
+                return CompletedProcessStub()
+
+            with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}, clear=False):
+                result = hub._send_via_origin_config(
+                    "codex-bot",
+                    "feishu:origin:u1",
+                    {"config_path": "C:/Users/fjc/.cc-connect/config.toml"},
+                    "hello",
+                    runner,
+                )
+
+        self.assertEqual(result["status"], "sent")
+        self.assertEqual(Path(calls[0][0][0]), shim)
 
 
 if __name__ == "__main__":

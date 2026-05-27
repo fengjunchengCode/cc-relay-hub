@@ -99,6 +99,8 @@ for p in found:
 
 After setup, rerun this Step 0.5 check to confirm config files exist.
 
+If you are adding a second Feishu bot to a separate config file such as `~/.cc-connect/config-codex.toml`, do not run setup against a missing file. Create a minimal project skeleton first, then use `cc-connect feishu bind --config <path>` after the Feishu app exists. Pause here until the target config contains platform credentials.
+
 **If config files are found**, continue to Step 0.6.
 
 ---
@@ -155,6 +157,19 @@ If this check fails, fix the `work_dir` in each reported config file, then rerun
 
 ---
 
+### Step 0.7: Windows Codex PATH guard
+
+On Windows, verify the Codex executable before configuring a Codex-backed cc-connect project:
+
+```powershell
+where.exe codex
+codex --version
+```
+
+If the first `where.exe codex` result is under `C:\Program Files\WindowsApps`, put a user-local `codex.cmd` shim before WindowsApps on `PATH` that points to the real Codex CLI under `%LOCALAPPDATA%\OpenAI\Codex\bin\...`. Then rerun `where.exe codex` and `codex --version` before continuing.
+
+---
+
 ### Step 1: Clone the repository
 
 ```bash
@@ -165,6 +180,14 @@ else
   git clone https://github.com/fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
   echo "Cloned via HTTPS"
 fi
+```
+
+If GitHub access requires a local proxy, use the same clone command with proxy settings:
+
+```bash
+git -c http.proxy=http://127.0.0.1:<port> \
+    -c https.proxy=http://127.0.0.1:<port> \
+    clone https://github.com/fengjunchengCode/cc-relay-hub.git ~/.cc-connect/cc-relay-hub
 ```
 
 Verify:
@@ -494,6 +517,7 @@ $CmdPath = Join-Path $Startup "cc-relay-hub-hook.cmd"
 
 $Cmd = @"
 @echo off
+cd /d "$Root"
 "$Node" "$Root\hook-server.mjs" >> "%TEMP%\cc-relay-hub-hook.log" 2>&1
 "@
 Set-Content -Path $CmdPath -Value $Cmd -Encoding ASCII
@@ -520,6 +544,14 @@ try {
 ---
 
 ### Step 6: Bootstrap and verify connectivity
+
+Before running bootstrap, pause and verify:
+
+- The target cc-connect config contains platform credentials.
+- Each cc-connect instance has been started.
+- For each cc-connect instance, verify its webhook port is listening.
+- Send one normal message to each bot and verify a session file exists.
+- Do not run parallel verification commands while bootstrap is refreshing the registry.
 
 ```bash
 cc-relay-hub bootstrap

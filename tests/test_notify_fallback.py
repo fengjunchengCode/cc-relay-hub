@@ -184,6 +184,36 @@ class NotifyFallbackTest(unittest.TestCase):
         notify = result["notify"]
         self.assertIn(notify["status"], ("sent", "failed"))
 
+    def test_missing_cc_connect_executable_falls_back_to_webhook(self):
+        """FileNotFoundError from config send should not crash relay notification."""
+        def runner(command, input_text):
+            raise FileNotFoundError("cc-connect")
+
+        result = hub.handle_hook_event(
+            {
+                "event": "message.sent",
+                "project": "claude-bot",
+                "session_key": "feishu:target:u1",
+                "content": "[cc-relay reply_to=req-1]\npong",
+                "timestamp": "2026-05-06T10:00:00+08:00",
+            },
+            state_path=self.db_path,
+            bindings={
+                "cc_connect": {
+                    "codex-bot": {
+                        "config_path": "/tmp/config-codex.toml",
+                        "webhook_port": 9999,
+                        "webhook_host": "127.0.0.1",
+                        "webhook_path": "/hook",
+                    },
+                }
+            },
+            runner=runner,
+        )
+
+        self.assertEqual(result["status"], "matched")
+        self.assertIn(result["notify"]["status"], ("sent", "failed"))
+
 
 if __name__ == "__main__":
     unittest.main()
