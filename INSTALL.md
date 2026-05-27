@@ -279,27 +279,77 @@ PY
 
 ---
 
-### Step 4: Restart cc-connect daemons
+### Step 4: Reload cc-connect configs
 
-After modifying configs, restart each cc-connect process so it picks up the new hooks.
+After modifying configs, the running cc-connect process must reload `config.toml` so it picks up the new `[webhook]` and `[[hooks]]` blocks.
+
+Prefer config reload over process restart. If reload is unavailable, restart the cc-connect daemon. Restarting cc-connect can interrupt this agent conversation because cc-connect may be the transport carrying the reply.
+
+Before any restart fallback, print this message to the user exactly:
+
+```text
+cc-connect needs to reload the new hook/webhook config. I will try a daemon restart now. This conversation may disconnect for 10-30 seconds. If I do not resume automatically, wait 30 seconds and send "继续" so I can verify and continue the installation.
+```
+
+Do NOT improvise platform commands. Do NOT use `taskkill` / `kill` on a foreground cc-connect process unless the user explicitly asks for a hard reset. Use the matching block for the current shell only.
+
+#### macOS/Linux bash/zsh
 
 ```bash
-# Restart all cc-connect launchd services
-for svc in $(launchctl list 2>/dev/null | grep cc-connect | awk '{print $3}'); do
-  echo "Restarting $svc ..."
-  launchctl kickstart -k "gui/$(id -u)/$svc" 2>/dev/null || true
-done
+echo 'cc-connect needs to reload the new hook/webhook config. I will try a daemon restart now. This conversation may disconnect for 10-30 seconds. If I do not resume automatically, wait 30 seconds and send "继续" so I can verify and continue the installation.'
 
-# If no launchd services found, try common label patterns
-if ! launchctl list 2>/dev/null | grep -q cc-connect; then
-  echo "No cc-connect launchd services found. Skipping daemon restart."
-  echo "If cc-connect is running as a foreground process, restart it manually."
+# First try cc-connect's service manager. This is safer than killing processes.
+if cc-connect daemon status >/tmp/cc-connect-daemon-status.txt 2>&1; then
+  cc-connect daemon restart || cc-connect daemon start
+else
+  # macOS fallback for launchd installs created by older cc-connect versions.
+  restarted=0
+  if command -v launchctl >/dev/null 2>&1; then
+    for svc in $(launchctl list 2>/dev/null | grep cc-connect | awk '{print $3}'); do
+      echo "Restarting launchd service $svc ..."
+      launchctl kickstart -k "gui/$(id -u)/$svc" 2>/dev/null && restarted=1
+    done
+  fi
+
+  if [ "$restarted" != "1" ]; then
+    echo "WARNING: No cc-connect daemon/service was found."
+    echo "Config files were updated, but a foreground cc-connect process cannot be safely restarted from this installer."
+    echo "Ask the user to restart cc-connect, then have them send \"继续\" and rerun: cc-relay-hub bootstrap"
+  fi
 fi
+```
+
+#### Windows PowerShell
+
+```powershell
+Write-Host 'cc-connect needs to reload the new hook/webhook config. I will try a daemon restart now. This conversation may disconnect for 10-30 seconds. If I do not resume automatically, wait 30 seconds and send "继续" so I can verify and continue the installation.'
+
+$daemonOk = $false
+cc-connect daemon status *> $env:TEMP\cc-connect-daemon-status.txt
+if ($LASTEXITCODE -eq 0) {
+  cc-connect daemon restart
+  if ($LASTEXITCODE -eq 0) { $daemonOk = $true }
+}
+
+if (-not $daemonOk) {
+  cc-connect daemon start
+  if ($LASTEXITCODE -eq 0) { $daemonOk = $true }
+}
+
+if (-not $daemonOk) {
+  Write-Host "WARNING: cc-connect daemon restart/start did not succeed."
+  Write-Host "Do not run taskkill from this installer. It can kill the cc-connect transport carrying this conversation."
+  Write-Host 'Config files were updated. Wait 30 seconds, send "继续", and rerun: cc-relay-hub bootstrap'
+}
 ```
 
 ---
 
 ### Step 5: Start the hook server
+
+Use the matching block for the current platform. Do NOT translate a block from another platform.
+
+#### macOS bash/zsh
 
 ```bash
 # Generate and install launchd plist
@@ -341,6 +391,88 @@ sleep 1
 lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node && echo "Hook server running on :9120" || echo "WARNING: hook server not listening"
 ```
 
+#### Linux bash/zsh
+
+```bash
+NODE_BIN="$(command -v node)"
+HOME_DIR="$HOME"
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/cc-relay-hub-hook.service <<EOF
+[Unit]
+Description=cc-relay-hub hook server
+
+[Service]
+ExecStart=${NODE_BIN} ${HOME_DIR}/.cc-connect/cc-relay-hub/hook-server.mjs
+Restart=always
+RestartSec=2
+StandardOutput=append:/tmp/cc-relay-hub-hook.log
+StandardError=append:/tmp/cc-relay-hub-hook.log
+
+[Install]
+WantedBy=default.target
+EOF
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user daemon-reload
+  systemctl --user enable --now cc-relay-hub-hook.service || {
+    echo "WARNING: systemd user service failed; falling back to nohup for this session."
+    nohup "$NODE_BIN" "$HOME_DIR/.cc-connect/cc-relay-hub/hook-server.mjs" >/tmp/cc-relay-hub-hook.log 2>&1 &
+  }
+else
+  nohup "$NODE_BIN" "$HOME_DIR/.cc-connect/cc-relay-hub/hook-server.mjs" >/tmp/cc-relay-hub-hook.log 2>&1 &
+fi
+
+sleep 1
+python3 - <<'PY'
+import socket
+s = socket.socket()
+s.settimeout(2)
+try:
+    s.connect(("127.0.0.1", 9120))
+except OSError as e:
+    print(f"WARNING: hook server not listening on :9120: {e}")
+    raise SystemExit(1)
+else:
+    print("Hook server running on :9120")
+finally:
+    s.close()
+PY
+```
+
+#### Windows PowerShell
+
+```powershell
+$Root = Join-Path $HOME ".cc-connect\cc-relay-hub"
+$Node = (Get-Command node).Source
+$Startup = [Environment]::GetFolderPath("Startup")
+$CmdPath = Join-Path $Startup "cc-relay-hub-hook.cmd"
+
+$Cmd = @"
+@echo off
+"$Node" "$Root\hook-server.mjs" >> "%TEMP%\cc-relay-hub-hook.log" 2>&1
+"@
+Set-Content -Path $CmdPath -Value $Cmd -Encoding ASCII
+
+Start-Process -FilePath $CmdPath -WindowStyle Hidden
+Start-Sleep -Seconds 1
+
+$client = New-Object Net.Sockets.TcpClient
+try {
+  $iar = $client.BeginConnect("127.0.0.1", 9120, $null, $null)
+  if (-not $iar.AsyncWaitHandle.WaitOne(2000, $false)) {
+    throw "timeout"
+  }
+  $client.EndConnect($iar)
+  Write-Host "Hook server running on :9120"
+} catch {
+  Write-Host "WARNING: hook server not listening on :9120"
+  exit 1
+} finally {
+  $client.Close()
+}
+```
+
 ---
 
 ### Step 6: Bootstrap and verify connectivity
@@ -379,8 +511,22 @@ cc-relay-hub list
 # Full connectivity check
 cc-relay-hub bootstrap
 
-# Verify hook server
+# Verify hook server on macOS/Linux
 lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node && echo "Hook server: OK"
+```
+
+On Windows PowerShell, verify the hook server with:
+
+```powershell
+$client = New-Object Net.Sockets.TcpClient
+try {
+  $iar = $client.BeginConnect("127.0.0.1", 9120, $null, $null)
+  if (-not $iar.AsyncWaitHandle.WaitOne(2000, $false)) { throw "timeout" }
+  $client.EndConnect($iar)
+  Write-Host "Hook server: OK"
+} finally {
+  $client.Close()
+}
 ```
 
 If all checks pass, installation is complete.
@@ -410,13 +556,14 @@ cc-relay-hub watch --loop           # continuous event streaming
 
 - The agent's cc-connect process is not running or its webhook port is not listening
 - Check: `cc-relay-hub info <agent>`
-- Restart the cc-connect daemon for that project
+- Reload/restart cc-connect using Step 4, then rerun `cc-relay-hub bootstrap`
 
 ### Hook events not appearing
 
 - Verify hook server: `lsof -nP -iTCP:9120 -sTCP:LISTEN | grep node`
 - Verify config: each project's TOML must have `[[hooks]]` with url `http://127.0.0.1:9120/cc-connect/hooks/reply`
-- Restart cc-connect after config changes
+- Reload cc-connect after config changes. Use daemon restart only if reload is unavailable.
+- If the install conversation stopped during restart, wait 30 seconds, send `继续`, then rerun `cc-relay-hub bootstrap`
 
 ### Session shows "missing"
 
