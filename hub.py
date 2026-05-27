@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import fcntl
 import json
 import os
 import subprocess
@@ -21,6 +20,15 @@ from core.envelope import RelayEnvelope
 from core.match import parse_relay_reply, wait_for_reply_framework
 from core.state import StateStore
 from providers.cc_connect import CCConnectProvider, _platform_from_session_key
+
+
+try:
+    import fcntl as _fcntl
+except ModuleNotFoundError:
+    _fcntl = None
+    import msvcrt as _msvcrt
+else:
+    _msvcrt = None
 
 
 DATA_DIR = Path.home() / ".cc-connect"
@@ -130,13 +138,13 @@ def write_json(path, payload):
 def mutate_registry_groups(mutator_fn):
     """Atomically read registry.json, apply mutator_fn(groups), write back.
 
-    Uses fcntl.flock to prevent concurrent mutations from losing updates.
+    Uses a platform lock to prevent concurrent mutations from losing updates.
     mutator_fn receives the groups dict and must modify it in-place.
     """
     lock_path = REGISTRY_PATH.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    with lock_path.open("a+") as lock_fd:
+        _lock_file(lock_fd)
         try:
             registry = load_json(REGISTRY_PATH)
             groups = registry.get("groups", {})
@@ -146,7 +154,27 @@ def mutate_registry_groups(mutator_fn):
             write_json(tmp, registry)
             os.replace(str(tmp), str(REGISTRY_PATH))
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            _unlock_file(lock_fd)
+
+
+def _lock_file(lock_fd):
+    if _fcntl is not None:
+        _fcntl.flock(lock_fd, _fcntl.LOCK_EX)
+        return
+    lock_fd.seek(0, os.SEEK_END)
+    if lock_fd.tell() == 0:
+        lock_fd.write("\0")
+        lock_fd.flush()
+    lock_fd.seek(0)
+    _msvcrt.locking(lock_fd.fileno(), _msvcrt.LK_LOCK, 1)
+
+
+def _unlock_file(lock_fd):
+    if _fcntl is not None:
+        _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+        return
+    lock_fd.seek(0)
+    _msvcrt.locking(lock_fd.fileno(), _msvcrt.LK_UNLCK, 1)
 
 
 def find_configs():
@@ -830,16 +858,15 @@ def _generate_claude_md(registry, bindings, agent_name):
     """Generate CLAUDE.md for Claude Code agents."""
     lines = []
     lines.append("# cc-relay-hub\n")
-    lines.append("Multi-agent message router. Use `hub.py` to discover peers and send messages.\n")
+    lines.append("Multi-agent message router. Use `cc-relay-hub` to discover peers and send messages.\n")
     lines.append("## Quick Reference\n")
     lines.append("```bash")
-    lines.append("cd %s" % HUB_DIR)
-    lines.append("python3 hub.py list")
-    lines.append("python3 hub.py info <agent>")
-    lines.append("python3 hub.py send <agent> \"message\" --wait --timeout 120")
-    lines.append("python3 hub.py cdp status <cdp-agent>")
-    lines.append("python3 hub.py groups")
-    lines.append("python3 hub.py relay <from> <to> \"message\"")
+    lines.append("cc-relay-hub list")
+    lines.append("cc-relay-hub info <agent>")
+    lines.append("cc-relay-hub send <agent> \"message\" --wait --timeout 120")
+    lines.append("cc-relay-hub cdp status <cdp-agent>")
+    lines.append("cc-relay-hub groups")
+    lines.append("cc-relay-hub relay <from> <to> \"message\"")
     lines.append("```\n")
 
     if agent_name:
@@ -865,13 +892,13 @@ def _generate_claude_md(registry, bindings, agent_name):
         lines.append("CDP-backed IDE agents are still contacted with `send --wait`; the hub writes into the IDE Agent chat through localhost CDP and reads the visible transcript.")
         lines.append("")
         lines.append("```bash")
-        lines.append("python3 hub.py info %s" % cdp_agents[0])
-        lines.append("python3 hub.py cdp status %s" % cdp_agents[0])
-        lines.append("python3 hub.py send %s \"task\" --wait --timeout 120" % cdp_agents[0])
+        lines.append("cc-relay-hub info %s" % cdp_agents[0])
+        lines.append("cc-relay-hub cdp status %s" % cdp_agents[0])
+        lines.append("cc-relay-hub send %s \"task\" --wait --timeout 120" % cdp_agents[0])
         lines.append("```")
         lines.append("")
         lines.append("- Empty `Session` and `Last Seen: never` are normal for CDP agents.")
-        lines.append("- If a CDP send times out, run `python3 hub.py cdp probe <agent>`, `python3 hub.py cdp heal <agent>`, and `python3 hub.py cdp screenshot <agent> --path /tmp/ide.png` before retrying.")
+        lines.append("- If a CDP send times out, run `cc-relay-hub cdp probe <agent>`, `cc-relay-hub cdp heal <agent>`, and `cc-relay-hub cdp screenshot <agent> --path /tmp/ide.png` before retrying.")
         lines.append("- Do not use `cc-connect relay send` for Antigravity/CDP delegation.")
 
     # Key facts
@@ -907,7 +934,7 @@ def _generate_cursor_rules(registry, bindings, agent_name):
     lines.append("- Check health: `%s info <agent>`" % _hub_command())
     lines.append("")
     lines.append("## Rules")
-    lines.append("- Never hardcode agent names. Discover with `hub.py list`.")
+    lines.append("- Never hardcode agent names. Discover with `%s list --format json`." % _hub_command())
     lines.append("- Check agent health before sending work.")
     lines.append("- When receiving relay markers, reply with the same marker.")
     return "\n".join(lines)

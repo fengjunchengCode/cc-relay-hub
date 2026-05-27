@@ -709,8 +709,8 @@ class BootstrapContextTest(unittest.TestCase):
         content = hub._generate_claude_md(registry, {"cc_connect": {}, "cdp": {}}, "claude-a")
 
         self.assertIn("CDP IDE Agents", content)
-        self.assertIn("python3 hub.py cdp status antigravity-ide", content)
-        self.assertIn("python3 hub.py send antigravity-ide", content)
+        self.assertIn("cc-relay-hub cdp status antigravity-ide", content)
+        self.assertIn("cc-relay-hub send antigravity-ide", content)
         self.assertIn("Empty `Session` and `Last Seen: never`", content)
 
     def test_global_scope_writes_cc_connect_style_memory_files(self):

@@ -34,8 +34,24 @@ command -v cc-connect || {
 # git must be installed
 command -v git || { echo "FATAL: git not found. Run: xcode-select --install"; exit 1; }
 
-# python3 must be installed (3.9+)
-python3 -c "import sys; assert sys.version_info >= (3,9)" || { echo "FATAL: python3 3.9+ required"; exit 1; }
+# Python 3.9+ must be installed. Unix usually has python3; Windows/Git Bash often has python.
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON_BIN=python
+else
+  echo "FATAL: Python 3.9+ not found. Install Python and rerun this installer."
+  exit 1
+fi
+"$PYTHON_BIN" - <<'PY' || { echo "FATAL: Python 3.9+ with tomllib or tomli required. For Python 3.9/3.10, run: $PYTHON_BIN -m pip install --user tomli"; exit 1; }
+import sys
+assert sys.version_info >= (3, 9)
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli
+PY
+export PYTHON_BIN
 
 # node must be installed
 command -v node || { echo "FATAL: node not found. Run: brew install node"; exit 1; }
@@ -48,7 +64,7 @@ If any check above fails, STOP here. Help the user install the missing tool, the
 Check if cc-connect has any configured projects:
 
 ```bash
-python3 -c "
+${PYTHON_BIN:-python3} -c "
 from pathlib import Path
 import sys
 home = Path.home()
@@ -92,7 +108,7 @@ After setup, rerun this Step 0.5 check to confirm config files exist.
 cc-connect's default config may contain `work_dir = "/path/to/your/project"` — a placeholder that prevents the agent from starting. Check and fix automatically:
 
 ```bash
-python3 <<'PY'
+${PYTHON_BIN:-python3} <<'PY'
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -172,6 +188,24 @@ hash -r
 command -v cc-relay-hub || echo "WARNING: cc-relay-hub not on PATH"
 ```
 
+On Windows PowerShell, install the `.cmd` wrapper:
+
+```powershell
+$Bin = Join-Path $HOME "bin"
+New-Item -ItemType Directory -Force -Path $Bin | Out-Null
+Copy-Item "$HOME\.cc-connect\cc-relay-hub\bin\cc-relay-hub.cmd" "$Bin\cc-relay-hub.cmd" -Force
+if (($env:Path -split ';') -notcontains $Bin) {
+  $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if ([string]::IsNullOrWhiteSpace($UserPath)) {
+    [Environment]::SetEnvironmentVariable("Path", $Bin, "User")
+  } else {
+    [Environment]::SetEnvironmentVariable("Path", "$UserPath;$Bin", "User")
+  }
+  $env:Path = "$env:Path;$Bin"
+  Write-Host "Added $Bin to the user PATH for future terminals."
+}
+```
+
 ---
 
 ### Step 3: Auto-configure hooks and webhooks
@@ -179,7 +213,7 @@ command -v cc-relay-hub || echo "WARNING: cc-relay-hub not on PATH"
 This step reads every cc-connect config file and adds the required `[[hooks]]` and `[webhook]` blocks if missing. It does NOT modify existing settings.
 
 ```bash
-python3 <<'PY'
+${PYTHON_BIN:-python3} <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -322,24 +356,34 @@ fi
 #### Windows PowerShell
 
 ```powershell
-Write-Host 'cc-connect needs to reload the new hook/webhook config. I will try a daemon restart now. This conversation may disconnect for 10-30 seconds. If I do not resume automatically, wait 30 seconds and send "继续" so I can verify and continue the installation.'
+Write-Host 'cc-connect needs to reload the new hook/webhook config. I will restart the current cc-connect process now. This conversation may disconnect for 10-30 seconds. If I do not resume automatically, wait 30 seconds and send "继续" so I can verify and continue the installation.'
 
-$daemonOk = $false
-cc-connect daemon status *> $env:TEMP\cc-connect-daemon-status.txt
-if ($LASTEXITCODE -eq 0) {
-  cc-connect daemon restart
-  if ($LASTEXITCODE -eq 0) { $daemonOk = $true }
-}
+$procs = @(Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -ieq "cc-connect.exe" -or $_.CommandLine -match "(^|[\\/])cc-connect(\.exe)?(\s|$)"
+})
 
-if (-not $daemonOk) {
-  cc-connect daemon start
-  if ($LASTEXITCODE -eq 0) { $daemonOk = $true }
-}
+if ($procs.Count -eq 0) {
+  Write-Host "No running cc-connect process found. Config files were updated; the next cc-connect start will load them."
+} else {
+  $restartScript = Join-Path $env:TEMP "cc-connect-restart.ps1"
+  $lines = @(
+    "Start-Sleep -Seconds 2"
+  )
+  foreach ($proc in $procs) {
+    if (-not $proc.CommandLine) {
+      Write-Host "WARNING: Cannot read command line for PID $($proc.ProcessId); skipping automatic restart for that process."
+      continue
+    }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($proc.CommandLine))
+    $lines += "`$cmd = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$encoded'))"
+    $lines += 'Start-Process -FilePath "cmd.exe" -ArgumentList ("/c start """" " + $cmd) -WindowStyle Hidden'
+  }
+  Set-Content -Path $restartScript -Value $lines -Encoding UTF8
+  Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $restartScript) -WindowStyle Hidden
 
-if (-not $daemonOk) {
-  Write-Host "WARNING: cc-connect daemon restart/start did not succeed."
-  Write-Host "Do not run taskkill from this installer. It can kill the cc-connect transport carrying this conversation."
-  Write-Host 'Config files were updated. Wait 30 seconds, send "继续", and rerun: cc-relay-hub bootstrap'
+  foreach ($proc in $procs) {
+    Stop-Process -Id $proc.ProcessId -Force
+  }
 }
 ```
 
@@ -424,7 +468,7 @@ else
 fi
 
 sleep 1
-python3 - <<'PY'
+${PYTHON_BIN:-python3} - <<'PY'
 import socket
 s = socket.socket()
 s.settimeout(2)

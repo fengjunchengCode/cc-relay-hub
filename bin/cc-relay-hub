@@ -18,14 +18,24 @@ resolve_dir() {
 
 SCRIPT_DIR="$(resolve_dir "$0")"
 
-if command -v python3 >/dev/null 2>&1; then
-  if python3 -c "import tomllib" 2>/dev/null || python3 -c "import tomli" 2>/dev/null; then
-    exec python3 "$SCRIPT_DIR/../hub.py" "$@"
+run_if_usable() {
+  candidate="$1"
+  shift
+  if command -v "$candidate" >/dev/null 2>&1; then
+    if "$candidate" -c "import sys; assert sys.version_info >= (3, 9); import tomllib" 2>/dev/null || "$candidate" -c "import sys; assert sys.version_info >= (3, 9); import tomli" 2>/dev/null; then
+      exec "$candidate" "$SCRIPT_DIR/../hub.py" "$@"
+    fi
+  fi
+}
+
+run_if_usable python3 "$@"
+run_if_usable python "$@"
+
+if command -v py >/dev/null 2>&1; then
+  if py -3 -c "import sys; assert sys.version_info >= (3, 9); import tomllib" 2>/dev/null || py -3 -c "import sys; assert sys.version_info >= (3, 9); import tomli" 2>/dev/null; then
+    exec py -3 "$SCRIPT_DIR/../hub.py" "$@"
   fi
 fi
-if command -v python >/dev/null 2>&1; then
-  exec python "$SCRIPT_DIR/../hub.py" "$@"
-fi
 
-echo "Error: python 3.9+ is required but not found" >&2
+echo "Error: Python 3.9+ with tomllib or tomli is required but not found" >&2
 exit 1
