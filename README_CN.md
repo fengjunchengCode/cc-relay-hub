@@ -15,6 +15,10 @@
   <a href="./README.md">English</a> | 中文
 </p>
 
+<p align="center">
+  <img src="./docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub 品牌图：relay hub 小终端、支持的 agent、app icon、README header 和 terminal status chip" width="920">
+</p>
+
 **你在手机上指挥本地 AI coding agent，cc-relay-hub 让这些 agent 私下互相派活、互相回信。**
 
 cc-connect 已经解决了第一步：你可以在飞书、微信、Telegram、Slack 等聊天入口里操作 Claude Code、Codex、Gemini CLI 或其他本地 agent。真正麻烦的是同时跑多个 agent 之后：Claude 想把实现交给 Codex，Hermes 想给多个 agent 分发任务，IDE agent 又要把结果回传回来。
@@ -22,8 +26,7 @@ cc-connect 已经解决了第一步：你可以在飞书、微信、Telegram、S
 cc-relay-hub 补上的就是这层安静的 agent-to-agent 交接。agent 可以发现同伴、发送任务、等待回复，并把答案带回最开始的对话。
 
 <p align="center">
-  <!-- TODO: 终端 Gif：Claude Code 把任务 relay 给 Codex，Codex 回复回 Claude 原会话。 -->
-  <em>演示占位：一条命令把任务从 Claude 交给 Codex，结果回到原来的会话。</em>
+  <strong>本地优先</strong> · <strong>agent agnostic</strong> · <strong>安静交接</strong> · <strong>自动闭环回信</strong>
 </p>
 
 ## ✨ Why cc-relay-hub?
@@ -56,7 +59,7 @@ cc-relay-hub 补上的就是这层安静的 agent-to-agent 交接。agent 可以
 
 cc-relay-hub 是一个本地 CLI + 一个很小的 hook server，二者都运行在 127.0.0.1。
 
-### 6.1 让 AI agent 帮你装
+### 方案 A：让 AI agent 帮你装
 
 把这段 prompt 丢给 Claude Code、Codex、Cursor Agent 或其他本地 coding agent：
 
@@ -66,7 +69,7 @@ Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/head
 
 安装指南是给 agent 执行的。它会检查依赖、复用 cc-connect 的自动化配置、写入本地 relay 配置、启动 hook server，并验证第一条路由。
 
-### 6.2 手动安装
+### 方案 B：手动安装
 
 <details>
 <summary>展开手动安装步骤</summary>

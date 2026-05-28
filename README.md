@@ -15,6 +15,10 @@
   English | <a href="./README_CN.md">中文</a>
 </p>
 
+<p align="center">
+  <img src="./docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub brand board showing the relay hub mascot, supported agents, app icon, README header, and terminal status chip" width="920">
+</p>
+
 **Use your phone to command local AI coding agents, then let those agents quietly hand work to each other.**
 
 cc-connect already makes the first part work: you can talk to Claude Code, Codex, Gemini CLI, or other local agents from Feishu, WeChat, Telegram, Slack, and more. The pain starts when you have more than one agent running. Claude needs Codex to implement something. Hermes wants to dispatch work to several agents. An IDE agent needs to report back without filling a group chat with bot noise.
@@ -22,8 +26,7 @@ cc-connect already makes the first part work: you can talk to Claude Code, Codex
 cc-relay-hub adds that private agent-to-agent handoff. Agents can discover peers, send tasks, wait for replies, and bring the answer back to the conversation where the work started.
 
 <p align="center">
-  <!-- TODO: Terminal GIF: Claude Code sends a relay task to Codex, Codex replies back into the original Claude session. -->
-  <em>Demo placeholder: one command sends work from Claude to Codex, and the answer returns to the original session.</em>
+  <strong>Local first</strong> · <strong>Agent agnostic</strong> · <strong>Quiet handoffs</strong> · <strong>Reply loops that close</strong>
 </p>
 
 ## ✨ Why cc-relay-hub?
@@ -56,7 +59,7 @@ I built cc-relay-hub because I was using cc-connect every day on my commute. Fro
 
 cc-relay-hub is a local CLI + a tiny hook server. Both run on 127.0.0.1.
 
-### 6.1 Let an AI agent install it for you
+### Option A: Let an AI agent install it for you
 
 Send this prompt to Claude Code, Codex, Cursor Agent, or any local coding agent:
 
@@ -66,7 +69,7 @@ Follow https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/refs/head
 
 The installer guide is written for agents. It checks prerequisites, reuses cc-connect's automated setup when possible, writes the local relay configuration, starts the hook server, and verifies the first route.
 
-### 6.2 Manual install
+### Option B: Manual install
 
 <details>
 <summary>Show the manual path</summary>
