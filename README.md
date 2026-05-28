@@ -1,6 +1,10 @@
 # cc-relay-hub
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub brand board showing the relay hub mascot, supported agents, app icon, README header, and terminal status chip" width="920">
+</p>
+
+<p align="center">
   <strong>Make your local AI coding agents talk to each other, so you do not have to copy messages between chat windows.</strong>
 </p>
 
@@ -13,10 +17,6 @@
 
 <p align="center">
   English | <a href="./README_CN.md">中文</a>
-</p>
-
-<p align="center">
-  <img src="./docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub brand board showing the relay hub mascot, supported agents, app icon, README header, and terminal status chip" width="920">
 </p>
 
 **Use your phone to command local AI coding agents, then let those agents quietly hand work to each other.**

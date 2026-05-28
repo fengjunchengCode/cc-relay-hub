@@ -1,6 +1,10 @@
 # cc-relay-hub
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub 品牌图：relay hub 小终端、支持的 agent、app icon、README header 和 terminal status chip" width="920">
+</p>
+
+<p align="center">
   <strong>让本地 AI coding agent 互相派活、互相回信，不再让你在聊天窗口之间复制粘贴。</strong>
 </p>
 
@@ -13,10 +17,6 @@
 
 <p align="center">
   <a href="./README.md">English</a> | 中文
-</p>
-
-<p align="center">
-  <img src="./docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub 品牌图：relay hub 小终端、支持的 agent、app icon、README header 和 terminal status chip" width="920">
 </p>
 
 **你在手机上指挥本地 AI coding agent，cc-relay-hub 让这些 agent 私下互相派活、互相回信。**
