@@ -1,7 +1,7 @@
 # cc-relay-hub
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub 品牌图：relay hub 小终端、支持的 agent、app icon、README header 和 terminal status chip" width="920">
+  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-readme-hero.png" alt="cc-relay-hub README 头图：本地 relay hub 小终端在手机和本地 AI agent 节点之间转发消息" width="920">
 </p>
 
 <p align="center">

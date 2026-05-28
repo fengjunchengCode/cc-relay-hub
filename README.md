@@ -1,7 +1,7 @@
 # cc-relay-hub
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-brand-board.png" alt="cc-relay-hub brand board showing the relay hub mascot, supported agents, app icon, README header, and terminal status chip" width="920">
+  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-readme-hero.png" alt="cc-relay-hub README hero showing the local relay hub mascot routing messages between a phone and local AI agent nodes" width="920">
 </p>
 
 <p align="center">
