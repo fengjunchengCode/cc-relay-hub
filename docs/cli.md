@@ -9,6 +9,7 @@ The wrapper command is `cc-relay-hub`. It invokes `hub.py` with Python 3.9+.
 | `cc-relay-hub bootstrap` | Scan configs, write registry/bindings, verify connectivity |
 | `cc-relay-hub list` | Discover configured local agents |
 | `cc-relay-hub send <agent> "<msg>" --wait` | Send and wait for the matched reply |
+| `cc-relay-hub send <agent> --stdin --wait` | Send a multiline message from stdin |
 | `cc-relay-hub relay <from> <to> "<msg>"` | Send a group-scoped agent-to-agent request and wait |
 | `cc-relay-hub watch` | One-shot long-poll for new hook events |
 
@@ -28,6 +29,8 @@ The wrapper command is `cc-relay-hub`. It invokes `hub.py` with Python 3.9+.
 | `cc-relay-hub send <agent> "<msg>"` | Send a message to a peer agent |
 | `cc-relay-hub send <agent> "<msg>" --wait` | Send and wait for the matched reply |
 | `cc-relay-hub send <agent> "<msg>" --group <group>` | Resolve the target within a group |
+| `cc-relay-hub send <agent> --stdin --wait` | Read the full message from stdin |
+| `cc-relay-hub send <agent> --message-file task.md --wait` | Read the full message from a UTF-8 file |
 | `cc-relay-hub groups` | List groups |
 | `cc-relay-hub groups show <name>` | Show group members |
 | `cc-relay-hub groups create <name>` | Create a group |
@@ -35,6 +38,7 @@ The wrapper command is `cc-relay-hub`. It invokes `hub.py` with Python 3.9+.
 | `cc-relay-hub groups join <group> <agent>` | Add an agent to a group |
 | `cc-relay-hub groups leave <group> <agent>` | Remove an agent from a group |
 | `cc-relay-hub relay <from> <to> "<msg>"` | Send from one agent to another and wait |
+| `cc-relay-hub relay <from> <to> --stdin` | Relay a multiline message from stdin |
 | `cc-relay-hub watch` | One-shot long-poll for hook events |
 | `cc-relay-hub watch --loop` | Continuous event stream for a human terminal or tmux pane |
 | `cc-relay-hub cdp status <agent>` | Check CDP-backed agent health |
@@ -50,6 +54,13 @@ CDP agents are normal `send` targets:
 cc-relay-hub info antigravity-ide
 cc-relay-hub cdp status antigravity-ide
 cc-relay-hub send antigravity-ide "task" --wait --timeout 120
+```
+
+For multiline or long messages, prefer stdin or a UTF-8 file. This is required on Windows when the message comes from a PowerShell here-string or variable; passing that variable through the `.cmd` wrapper as positional `"<msg>"` can lose content before Python receives it.
+
+```powershell
+Get-Content .\task.md -Raw | cc-relay-hub send my-project --stdin --wait --timeout 300
+cc-relay-hub send my-project --message-file .\task.md --wait --timeout 300
 ```
 
 For CDP agents, an empty `Session` or `Last Seen: never` is expected; use `cdp status/probe/heal/screenshot` for IDE-side diagnostics.

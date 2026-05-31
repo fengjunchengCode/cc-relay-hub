@@ -15,6 +15,7 @@ cc-relay-hub groups                 # list groups and members
 
 ```bash
 cc-relay-hub send <agent> "task description" --wait --timeout 120
+Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait --timeout 120
 ```
 
 - For `cc_connect` agents, delivers via local webhook HTTP POST.
@@ -22,6 +23,7 @@ cc-relay-hub send <agent> "task description" --wait --timeout 120
 - `--wait` blocks until the target replies or timeout.
 - Always check `info <agent>` before sending.
 - If `info` shows `Provider: cdp`, still use `cc-relay-hub send <agent> "task" --wait`; do not switch to `cc-connect relay`.
+- For multiline or long tasks, use `--stdin` or `--message-file`; on Windows, do not pass a PowerShell multiline variable as positional `"task"`.
 
 ## CDP IDE Agents
 

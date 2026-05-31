@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -79,6 +80,37 @@ class StateStoreTest(unittest.TestCase):
         self.assertEqual(message["origin_project"], "relay-bot")
         self.assertEqual(message["origin_session_key"], "feishu:origin:u1")
         self.assertEqual(message["notified_at"], 105.0)
+
+    def test_text_fields_replace_invalid_surrogates_before_sqlite_write(self):
+        self.store.insert_message(
+            request_id="req-3",
+            sender="hub",
+            target="claude-bot",
+            session_key="feishu:s1:u1",
+            provider="cc_connect",
+            body="bad\udcadbody",
+            status="pending",
+            created_at=100.0,
+        )
+        self.store.mark_replied("req-3", "reply\udc80body", 101.0)
+        self.store.append_event(
+            event_type="message.sent",
+            agent_id="claude-bot",
+            request_id="req-3",
+            session_key="feishu:s1:u1",
+            content="event\udcaecontent",
+            timestamp=101.0,
+        )
+
+        message = self.store.get_message("req-3")
+        self.assertEqual(message["body"], "bad?body")
+        self.assertEqual(message["reply_body"], "reply?body")
+        conn = sqlite3.connect(self.db_path)
+        try:
+            event = conn.execute("SELECT content FROM events WHERE request_id = ?", ("req-3",)).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual(event[0], "event?content")
 
 
 if __name__ == "__main__":

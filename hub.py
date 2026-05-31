@@ -51,7 +51,7 @@ def parse_args(argv):
 
     send_parser = subparsers.add_parser("send")
     send_parser.add_argument("agent")
-    send_parser.add_argument("message")
+    _add_message_input_args(send_parser)
     send_parser.add_argument("--wait", action="store_true")
     send_parser.add_argument("--timeout", type=int, default=300)
     send_parser.add_argument("--group", default=None, help="Target group for agent lookup")
@@ -98,7 +98,7 @@ def parse_args(argv):
     relay_parser = subparsers.add_parser("relay", help="Send message between agents in the same group")
     relay_parser.add_argument("from_agent")
     relay_parser.add_argument("to_agent")
-    relay_parser.add_argument("message")
+    _add_message_input_args(relay_parser)
     relay_parser.add_argument("--timeout", type=int, default=300)
 
     watch_parser = subparsers.add_parser("watch", help="Long-poll for hook events (no shell loop needed)")
@@ -122,6 +122,30 @@ def parse_args(argv):
     cdp_sub.add_parser("heal", help="Run auto-healer").add_argument("agent")
 
     return parser.parse_args(argv)
+
+
+def _add_message_input_args(command_parser):
+    command_parser.add_argument("message", nargs="?", help="Message body. Use --stdin or --message-file for multiline text.")
+    source = command_parser.add_mutually_exclusive_group()
+    source.add_argument("--stdin", action="store_true", help="Read the full message body from standard input.")
+    source.add_argument("--message-file", help="Read the full message body from a UTF-8 text file.")
+
+
+def _resolve_message_input(args):
+    has_inline = getattr(args, "message", None) is not None
+    has_stdin = bool(getattr(args, "stdin", False))
+    message_file = getattr(args, "message_file", None)
+    has_file = message_file is not None
+    if sum([has_inline, has_stdin, has_file]) != 1:
+        raise ValueError("provide exactly one message source: MESSAGE, --stdin, or --message-file")
+    if has_stdin:
+        return sys.stdin.read()
+    if has_file:
+        try:
+            return Path(message_file).read_text(encoding="utf-8-sig")
+        except OSError as exc:
+            raise ValueError("cannot read --message-file %s: %s" % (message_file, exc)) from exc
+    return args.message
 
 
 def load_json(path):
@@ -811,9 +835,11 @@ def _routing_contract_lines(agent_name=None):
         "%s list --format json" % cmd,
         "%s info <agent>" % cmd,
         "%s send <agent> \"task\" --wait --timeout 120" % cmd,
+        "Get-Content task.md -Raw | %s send <agent> --stdin --wait --timeout 120" % cmd,
         "%s relay %s <to-agent> \"task\" --timeout 120" % (cmd, relay_from),
         "```",
         "",
+        "For multiline or long messages, use `--stdin` or `--message-file`; do not pass a PowerShell multiline variable as the quoted positional MESSAGE on Windows.",
         "Use cc-connect relay only for cc-connect's group-chat relay feature after a chat has been bound with /bind.",
         "Do not use `cc-connect relay send` for direct/private agent-to-agent delegation.",
         "Do not send messages across groups. Treat ungrouped agents as separate from named groups; exact agent names do not bypass group isolation.",
@@ -880,6 +906,7 @@ def _generate_claude_md(registry, bindings, agent_name):
     lines.append("cc-relay-hub list")
     lines.append("cc-relay-hub info <agent>")
     lines.append("cc-relay-hub send <agent> \"message\" --wait --timeout 120")
+    lines.append("Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait --timeout 120")
     lines.append("cc-relay-hub cdp status <cdp-agent>")
     lines.append("cc-relay-hub groups")
     lines.append("cc-relay-hub relay <from> <to> \"message\"")
@@ -920,6 +947,7 @@ def _generate_claude_md(registry, bindings, agent_name):
     # Key facts
     lines.append("\n## Key Facts\n")
     lines.append("- `send` is provider-aware: cc-connect agents use local webhook HTTP POST; CDP agents use localhost Chrome DevTools Protocol.")
+    lines.append("- Use `--stdin` or `--message-file` for multiline or long tasks, especially on Windows.")
     lines.append("- CDP agents use virtual session key `cdp:<agent_name>`.")
     lines.append("- Hook-server long-poll: `GET http://127.0.0.1:9120/events/longpoll`")
     lines.append("- When receiving relay markers, reply with the same marker.")
@@ -947,6 +975,7 @@ def _generate_cursor_rules(registry, bindings, agent_name):
     lines.append("## Commands")
     lines.append("- List agents: `%s list --format json`" % _hub_command())
     lines.append("- Send message: `%s send <agent> \"msg\" --wait`" % _hub_command())
+    lines.append("- Send multiline message: `Get-Content task.md -Raw | %s send <agent> --stdin --wait`" % _hub_command())
     lines.append("- Check health: `%s info <agent>`" % _hub_command())
     lines.append("")
     lines.append("## Rules")
@@ -1213,6 +1242,12 @@ def cmd_bootstrap_context(args):
 
 
 def cmd_send(args):
+    try:
+        message_body = _resolve_message_input(args)
+    except ValueError as exc:
+        print("Error: %s" % exc)
+        return 1
+
     registry, bindings = ensure_registry_and_bindings()
 
     origin_project, origin_session = resolve_origin_context(args)
@@ -1263,7 +1298,7 @@ def cmd_send(args):
         request_id=request_id,
         sender="cc-relay",
         target=agent["name"],
-        body=args.message,
+        body=message_body,
         created_at=now,
         reply_to=None,
         ttl=int(args.timeout),
@@ -1287,9 +1322,9 @@ def cmd_send(args):
         print("busy: session %s already has a pending request" % effective_session)
         return 1
 
-    is_control = args.message.startswith("/") and provider.supports_control()
+    is_control = message_body.startswith("/") and provider.supports_control()
     if is_control:
-        result = provider.execute_command(args.message)
+        result = provider.execute_command(message_body)
         if result.status != "delivered":
             state.mark_failed(request_id, result.error or "command failed")
             state.release_session_lock(effective_session, request_id)
@@ -1306,7 +1341,11 @@ def cmd_send(args):
         state.mark_delivered(request_id, receipt.delivered_at)
 
     if not args.wait:
-        print("Message sent to %s" % agent["name"])
+        print("Message sent to %s (request_id=%s body_chars=%d)" % (
+            agent["name"],
+            request_id,
+            len(envelope.body),
+        ))
         return 0
 
     reply = wait_for_reply_framework(
@@ -1521,6 +1560,12 @@ def cmd_groups(args):
 
 
 def cmd_relay(args):
+    try:
+        message_body = _resolve_message_input(args)
+    except ValueError as exc:
+        print("Error: %s" % exc)
+        return 1
+
     registry, bindings = ensure_registry_and_bindings()
 
     # Validate both agents exist
@@ -1567,7 +1612,7 @@ def cmd_relay(args):
         request_id=request_id,
         sender=from_name,
         target=to_name,
-        body=args.message,
+        body=message_body,
         created_at=now,
         reply_to=None,
         ttl=int(args.timeout),
@@ -1599,7 +1644,12 @@ def cmd_relay(args):
         print("Error: %s" % (receipt.error or "delivery failed"))
         return 1
     state.mark_delivered(request_id, receipt.delivered_at)
-    print("[%s → %s] Message sent. Waiting for reply..." % (from_name, to_name))
+    print("[%s -> %s] Message sent (request_id=%s body_chars=%d). Waiting for reply..." % (
+        from_name,
+        to_name,
+        request_id,
+        len(envelope.body),
+    ))
 
     reply = wait_for_reply_framework(
         store=state,
@@ -1613,7 +1663,7 @@ def cmd_relay(args):
         print("timeout: no reply from '%s' within %ds" % (to_name, args.timeout))
         return 1
 
-    print("[%s → %s] Reply:" % (to_name, from_name))
+    print("[%s -> %s] Reply:" % (to_name, from_name))
     print(reply)
 
     # Notify the from-agent about the reply (only for cc_connect with valid session)

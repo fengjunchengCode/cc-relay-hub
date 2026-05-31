@@ -99,6 +99,7 @@ Most-used commands:
 cc-relay-hub bootstrap
 cc-relay-hub list
 cc-relay-hub send <agent> "task" --wait
+Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait
 cc-relay-hub relay <from-agent> <to-agent> "task"
 cc-relay-hub watch
 ```

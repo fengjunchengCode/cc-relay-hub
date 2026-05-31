@@ -80,9 +80,12 @@ Do not use shell polling loops such as `tail -f`, `while true`, or repeated `sle
 
 ```bash
 cc-relay-hub send <agent> "task" --wait
+Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait
 cc-relay-hub watch
 cc-relay-hub watch --loop
 ```
+
+Use `--stdin` or `--message-file` for multiline or long messages. This avoids Windows `.cmd` argument handling truncating a PowerShell here-string or multiline variable before cc-relay-hub receives it.
 
 ## CDP Operations
 

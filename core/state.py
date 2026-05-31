@@ -2,6 +2,16 @@ import sqlite3
 import time
 
 
+def _sanitize_text(value):
+    if isinstance(value, str):
+        return value.encode("utf-8", "replace").decode("utf-8")
+    return value
+
+
+def _sanitize_params(params):
+    return tuple(_sanitize_text(value) for value in params)
+
+
 class StateStore(object):
     def __init__(self, db_path):
         self.db_path = db_path
@@ -107,15 +117,15 @@ class StateStore(object):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        request_id,
-                        sender,
-                        target,
-                        session_key,
-                        provider,
-                        body,
-                        status,
-                        origin_project,
-                        origin_session_key,
+                        _sanitize_text(request_id),
+                        _sanitize_text(sender),
+                        _sanitize_text(target),
+                        _sanitize_text(session_key),
+                        _sanitize_text(provider),
+                        _sanitize_text(body),
+                        _sanitize_text(status),
+                        _sanitize_text(origin_project),
+                        _sanitize_text(origin_session_key),
                         created_at,
                     ),
                 )
@@ -168,7 +178,7 @@ class StateStore(object):
         conn = self._connect()
         try:
             with conn:
-                conn.execute(sql, params)
+                conn.execute(sql, _sanitize_params(params))
         finally:
             conn.close()
 
@@ -204,7 +214,7 @@ class StateStore(object):
                         event_type, agent_id, request_id, session_key, content, timestamp
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (event_type, agent_id, request_id, session_key, content, timestamp),
+                    _sanitize_params((event_type, agent_id, request_id, session_key, content, timestamp)),
                 )
         finally:
             conn.close()

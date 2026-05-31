@@ -47,6 +47,8 @@ cc-relay-hub info <agent>
 cc-relay-hub send <agent> "<message>"
 cc-relay-hub send <agent> "<message>" --wait --timeout 300
 cc-relay-hub send <agent> "<message>" --group <group>
+cc-relay-hub send <agent> --stdin --wait --timeout 300
+cc-relay-hub send <agent> --message-file task.md --wait --timeout 300
 
 # Groups
 cc-relay-hub groups                          # list all groups
@@ -57,6 +59,7 @@ cc-relay-hub groups leave <group> <agent>
 
 # Relay (agent-to-agent, always waits)
 cc-relay-hub relay <from-agent> <to-agent> "<message>"
+cc-relay-hub relay <from-agent> <to-agent> --stdin
 
 # Events
 cc-relay-hub watch                        # one-shot: block until an event arrives
@@ -77,6 +80,8 @@ cc-relay-hub cdp screenshot <agent> --path /tmp/ide.png
 3. Send a concrete task with `cc-relay-hub send`.
 4. Use `--wait` only when you need serialized request/reply flow on that target session.
 5. To check for incoming events, use `cc-relay-hub watch` (one-shot) or `cc-relay-hub watch --loop`.
+
+For multiline or long tasks, always use `--stdin` or `--message-file`. On Windows, do not pass a PowerShell here-string or multiline variable as the positional `"<message>"`, because the `.cmd` wrapper may not preserve the complete body.
 
 ## CDP IDE agent flow
 
@@ -117,6 +122,7 @@ prevent it from receiving new user messages.
 
 Instead use:
 - `cc-relay-hub send <agent> "<msg>" --wait` for request/reply (blocks in Python, not shell)
+- `Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait` for multiline request/reply
 - `cc-relay-hub watch` for one-shot event check (single HTTP long-poll)
 - `cc-relay-hub watch --loop` for continuous streaming (single Python process, no shell loop)
 - `curl http://127.0.0.1:9120/events/longpoll?since=<ISO>&timeout=30` for raw HTTP long-poll
