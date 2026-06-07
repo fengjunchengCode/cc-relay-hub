@@ -676,7 +676,7 @@ class BootstrapContextTest(unittest.TestCase):
                 args = hub.parse_args(["bootstrap", "context", "--write", "--scope", "cwd"])
                 hub.cmd_bootstrap_context(args)
                 hub.cmd_bootstrap_context(args)
-                content = (Path(tmpdir) / "AGENTS.md").read_text()
+                content = (Path(tmpdir) / "AGENTS.md").read_text(encoding="utf-8")
                 # Should not have duplicate "## Available Peers"
                 self.assertEqual(content.count("## Available Peers"), 1)
                 self.assertEqual(content.count("## Message Routing Contract"), 1)
@@ -695,6 +695,15 @@ class BootstrapContextTest(unittest.TestCase):
         self.assertIn("cc-relay-hub send antigravity-ide", content.replace("<agent>", "antigravity-ide"))
         self.assertIn("Last Seen: never", content)
         self.assertIn("Provider: cdp", content)
+
+    def test_generated_agents_context_prefers_async_private_replies(self):
+        registry = _make_registry({})
+        content = hub._generate_agents_md(registry, {"cc_connect": {}, "cdp": {}}, None)
+
+        self.assertIn("Before sending, decide whether the message needs a reply", content)
+        self.assertIn("send <agent> \"status update\" --no-reply", content)
+        self.assertIn("Do not use `cc-relay-hub watch`, `watch --loop`, shell polling, or `send --wait`", content)
+        self.assertIn("avoid reply-to-reply loops", content)
 
     def test_generated_claude_context_explains_cdp_targets(self):
         registry = {
@@ -742,8 +751,8 @@ class BootstrapContextTest(unittest.TestCase):
                 codex_file = Path(tmpdir) / ".codex" / "AGENTS.md"
                 self.assertTrue(claude_file.exists())
                 self.assertTrue(codex_file.exists())
-                self.assertIn("cc-relay-hub:begin", claude_file.read_text())
-                self.assertIn("cc-relay-hub:begin", codex_file.read_text())
+                self.assertIn("cc-relay-hub:begin", claude_file.read_text(encoding="utf-8"))
+                self.assertIn("cc-relay-hub:begin", codex_file.read_text(encoding="utf-8"))
             finally:
                 hub.REGISTRY_PATH = old_reg
                 hub.BINDINGS_PATH = old_bind

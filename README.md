@@ -36,7 +36,7 @@ cc-relay-hub adds that private agent-to-agent handoff. Agents can discover peers
 - 🔁 <strong>Close the loop automatically</strong> — Send work from Claude to Codex and get the answer back where the request started.
 - 🧭 **Let agents find the right teammate** — `cc-relay-hub list` shows live peers, while generated project instructions teach new agents how to use them.
 - 🧩 **Bridge CLI agents and IDE agents** — Use cc-connect-backed agents for Claude Code and Codex, and CDP-backed agents for Electron IDEs such as Antigravity.
-- ⏳ **Wait safely inside agent tools** — `send --wait`, `relay`, and `watch` replace fragile shell polling loops.
+- ⏳ **Close replies without blocking** — plain `send` returns immediately while the hook server forwards marked replies back to the origin chat.
 
 ## 🛤️ Why I built this
 
@@ -50,9 +50,9 @@ I built cc-relay-hub because I was using cc-connect every day on my commute. Fro
 |---|---|---|
 | Use a local agent from your phone | Great fit | Keeps that workflow |
 | Talk privately with one agent | Great fit | Keeps chats separate |
-| Ask Claude to hand work to Codex | You copy and paste, or @ in a group | `relay` sends it directly |
+| Ask Claude to hand work to Codex | You copy and paste, or @ in a group | `send` delivers it directly and returns |
 | Coordinate several agents | Group chat can get noisy | Hermes can dispatch quietly |
-| Wait for another agent's answer | You watch the chat | The calling agent waits with `--wait` |
+| Wait for another agent's answer | You watch the chat | The hook server forwards marked replies without blocking the caller |
 | Bring an IDE agent into the team | Not the main path | CDP can connect Antigravity or Cursor |
 
 ## 🚀 Quick Start
@@ -98,23 +98,26 @@ Most-used commands:
 ```bash
 cc-relay-hub bootstrap
 cc-relay-hub list
-cc-relay-hub send <agent> "task" --wait
-Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait
-cc-relay-hub relay <from-agent> <to-agent> "task"
+cc-relay-hub send <agent> "task"
+Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin
+cc-relay-hub send <agent> "status update" --no-reply
+cc-relay-hub relay <from-agent> <to-agent> "task"  # synchronous diagnostic handoff
 cc-relay-hub watch
 ```
 
+Private agent-to-agent messages are asynchronous by default: send the task, then let the target's marked reply be forwarded by the hook server. Do not open listeners or use `--wait` from an agent conversation unless a human explicitly asks for a synchronous diagnostic wait.
+
 ## 💬 Typical workflows
 
-### 1. Claude sends a relay task to Codex
+### 1. Claude sends a private task to Codex
 
 You finish the plan in Claude Code, then relay the implementation to Codex:
 
 ```bash
-cc-relay-hub relay claude codex "Implement this plan and run the tests" --timeout 180
+cc-relay-hub send codex "Implement this plan and run the tests"
 ```
 
-Codex works in its own session and the result comes back to Claude's current conversation. You keep thinking in Claude while Codex handles the patch.
+Codex works in its own session and the marked result comes back to Claude's current conversation through the hook server. Claude does not open a listener while Codex handles the patch.
 
 <!-- TODO: Screenshot/GIF: Claude Code runs `cc-relay-hub relay ...`, Codex replies, result returns to Claude. Suggested path: docs/assets/demo-relay-claude-codex.gif -->
 
@@ -124,8 +127,8 @@ Hermes can discover the local agent network, pick targets by name or group, and 
 
 ```bash
 cc-relay-hub list --format json
-cc-relay-hub send codex "Implement the parser change" --wait
-cc-relay-hub send claude "Review the patch for regressions" --wait
+cc-relay-hub send codex "Implement the parser change"
+cc-relay-hub send claude "Review the patch for regressions"
 ```
 
 The point is not a louder group chat. It is a quiet dispatcher that keeps each agent's work in the right lane.
@@ -138,7 +141,7 @@ Some work belongs inside an IDE. With a CDP-backed agent, Hermes can send a task
 
 ```bash
 cc-relay-hub cdp status antigravity-ide
-cc-relay-hub send antigravity-ide "Open the project and inspect the failing workflow" --wait
+cc-relay-hub send antigravity-ide "Open the project and inspect the failing workflow"
 ```
 
 This brings Electron IDE agents into the same local team as Claude Code and Codex.

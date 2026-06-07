@@ -15,6 +15,9 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
 - When the user says they added a new cc-connect instance or changed work directories with cc-connect `/dir`, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and refresh global/workdir agent context blocks.
 - When you receive `[cc-relay request_id=...]`, always reply with `[cc-relay reply_to=...]`; never answer `NO_REPLY` or omit the marker because the task says "only reply X".
+- Before sending a private message, decide whether a reply is needed. Use plain `send` for requests that need a result, and `send --no-reply` for notifications or acknowledgements.
+- Do not open listeners, run `watch`, run `watch --loop`, use shell polling, raw long-poll HTTP, or use `send --wait` to wait for a private-message reply unless the user explicitly asks for a synchronous diagnostic wait.
+- Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.
 
 ## Routing Contract
 
@@ -45,10 +48,10 @@ cc-relay-hub info <agent>
 
 # Send (via webhook, NOT Feishu API)
 cc-relay-hub send <agent> "<message>"
-cc-relay-hub send <agent> "<message>" --wait --timeout 300
+cc-relay-hub send <agent> "<message>" --no-reply
 cc-relay-hub send <agent> "<message>" --group <group>
-cc-relay-hub send <agent> --stdin --wait --timeout 300
-cc-relay-hub send <agent> --message-file task.md --wait --timeout 300
+cc-relay-hub send <agent> --stdin
+cc-relay-hub send <agent> --message-file task.md
 
 # Groups
 cc-relay-hub groups                          # list all groups
@@ -57,11 +60,11 @@ cc-relay-hub groups create <name> [--desc "..."]
 cc-relay-hub groups join <group> <agent>
 cc-relay-hub groups leave <group> <agent>
 
-# Relay (agent-to-agent, always waits)
+# Relay (agent-to-agent, always waits; avoid for routine private messages)
 cc-relay-hub relay <from-agent> <to-agent> "<message>"
 cc-relay-hub relay <from-agent> <to-agent> --stdin
 
-# Events
+# Events (human diagnostics only; do not use to wait for private replies)
 cc-relay-hub watch                        # one-shot: block until an event arrives
 cc-relay-hub watch --loop --format text   # continuous: stream events as they arrive
 
@@ -77,9 +80,9 @@ cc-relay-hub cdp screenshot <agent> --path /tmp/ide.png
 
 1. Run `cc-relay-hub list --format json` and choose a target from current live output.
 2. Run `cc-relay-hub info <agent>` to confirm webhook/session health.
-3. Send a concrete task with `cc-relay-hub send`.
-4. Use `--wait` only when you need serialized request/reply flow on that target session.
-5. To check for incoming events, use `cc-relay-hub watch` (one-shot) or `cc-relay-hub watch --loop`.
+3. Decide whether the private message requires a reply.
+4. If a reply is required, send a concrete task with plain `cc-relay-hub send` and return to the user; the target's marked final answer is forwarded by the hook server.
+5. If no reply is required, use `cc-relay-hub send --no-reply` so the target does not answer only to acknowledge.
 
 For multiline or long tasks, always use `--stdin` or `--message-file`. On Windows, do not pass a PowerShell here-string or multiline variable as the positional `"<message>"`, because the `.cmd` wrapper may not preserve the complete body.
 
@@ -91,7 +94,7 @@ CDP-backed IDE agents, including Antigravity, are first-class `send` targets:
 cc-relay-hub list --format json
 cc-relay-hub info antigravity-ide
 cc-relay-hub cdp status antigravity-ide
-cc-relay-hub send antigravity-ide "inspect this project and report findings" --wait --timeout 120
+cc-relay-hub send antigravity-ide "inspect this project and report findings"
 ```
 
 Provider-specific facts:
@@ -99,7 +102,7 @@ Provider-specific facts:
 - `Provider: cdp` means the hub controls an Electron IDE through localhost CDP, not a cc-connect webhook.
 - `Session` may be empty and `Last Seen: never`; this is normal for CDP because replies are read from the visible IDE transcript.
 - Use the exact agent name from `list`; common Antigravity name is `antigravity-ide`.
-- If `send --wait` fails or times out, run `cc-relay-hub cdp status`, `cc-relay-hub cdp probe`, `cc-relay-hub cdp heal`, and `cc-relay-hub cdp screenshot --path /tmp/antigravity.png` before retrying.
+- Use `send --wait` only when the user explicitly asks for a synchronous diagnostic wait. If it fails or times out, run `cc-relay-hub cdp status`, `cc-relay-hub cdp probe`, `cc-relay-hub cdp heal`, and `cc-relay-hub cdp screenshot --path /tmp/antigravity.png` before retrying.
 - Do not use `cc-connect relay send` for Antigravity/CDP delegation.
 
 ## CRITICAL: How delivery works
@@ -112,20 +115,20 @@ Provider-specific facts:
 - No echo filter — the message is processed by cc-connect and forwarded to the agent.
 - Do NOT use Feishu API directly to send messages to bots (echo filter drops bot's own messages).
 - For `cdp` agents it delivers via **Chrome DevTools Protocol** to the local IDE window and reads the reply from the IDE DOM transcript.
-- `send antigravity-ide "msg" --wait` → writes into Antigravity's Agent chat and waits for a relay marker in the visible response.
+- `send antigravity-ide "msg"` writes into Antigravity's Agent chat. Use `--wait` only for explicit synchronous diagnostics.
 
-## CRITICAL: Never use shell polling loops
+## CRITICAL: Never open listeners to wait for private replies
 
-**Do NOT use `tail -f`, `while true`, `sleep` loops, or any shell-based file
-monitoring to watch for hook events.** These block the agent's conversation and
-prevent it from receiving new user messages.
+**Do NOT use `tail -f`, `while true`, repeated `sleep`, `cc-relay-hub watch`,
+`cc-relay-hub watch --loop`, raw long-poll HTTP, or `send --wait` to wait for
+private-message replies from an agent conversation.** These block the agent's
+conversation and can prevent it from receiving new user messages.
 
 Instead use:
-- `cc-relay-hub send <agent> "<msg>" --wait` for request/reply (blocks in Python, not shell)
-- `Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait` for multiline request/reply
-- `cc-relay-hub watch` for one-shot event check (single HTTP long-poll)
-- `cc-relay-hub watch --loop` for continuous streaming (single Python process, no shell loop)
-- `curl http://127.0.0.1:9120/events/longpoll?since=<ISO>&timeout=30` for raw HTTP long-poll
+- `cc-relay-hub send <agent> "<msg>"` for requests that need a result; return immediately and let the hook server forward the marked reply.
+- `Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin` for multiline request/reply.
+- `cc-relay-hub send <agent> "<msg>" --no-reply` for notices, acknowledgements, or status updates that should not trigger another response.
+- `cc-relay-hub watch` only when a human explicitly asks for a diagnostic event check.
 
 ## Notes
 

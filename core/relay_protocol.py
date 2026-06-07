@@ -13,6 +13,21 @@ def build_relay_prompt(envelope):
 
     Moved from providers/cc_connect.py so both providers share it.
     """
+    if not getattr(envelope, "expect_reply", True):
+        return "\n".join([
+            "[cc-relay notice_id=%s]" % envelope.request_id,
+            "",
+            "This is a direct cc-relay-hub notice addressed to you.",
+            "No reply is requested for this notice.",
+            "Do not start your answer with a cc-relay reply marker.",
+            "Do not send a message back only to acknowledge this notice.",
+            "",
+            "Notice:",
+            envelope.body,
+            "",
+            "If the notice explicitly asks you to take action, do the action quietly unless the sender asks for a result.",
+        ])
+
     return "\n".join([
         "[cc-relay request_id=%s]" % envelope.request_id,
         "",

@@ -39,6 +39,7 @@ class CCConnectProviderTest(unittest.TestCase):
 
     def test_deliver_posts_webhook_payload(self):
         with tempfile.TemporaryDirectory():
+            CaptureHandler.payloads = []
             server = socketserver.TCPServer(("127.0.0.1", 0), CaptureHandler)
             thread = threading.Thread(target=server.serve_forever)
             thread.daemon = True
@@ -73,6 +74,47 @@ class CCConnectProviderTest(unittest.TestCase):
                 self.assertIn("ping", payload["prompt"])
                 self.assertIn("[cc-relay request_id=req-1]", payload["prompt"])
                 self.assertIn("[cc-relay reply_to=req-1]", payload["prompt"])
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+
+    def test_deliver_no_reply_posts_notice_without_reply_marker(self):
+        with tempfile.TemporaryDirectory():
+            CaptureHandler.payloads = []
+            server = socketserver.TCPServer(("127.0.0.1", 0), CaptureHandler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.daemon = True
+            thread.start()
+            try:
+                port = server.server_address[1]
+                provider = CCConnectProvider(
+                    agent_id="codex-bot",
+                    binding={
+                        "webhook_port": port,
+                        "webhook_path": "/hook",
+                        "session_key": "feishu:s1:u1",
+                    },
+                )
+                envelope = RelayEnvelope(
+                    request_id="notice-1",
+                    sender="hub",
+                    target="codex-bot",
+                    body="status update",
+                    created_at=1.0,
+                    reply_to=None,
+                    ttl=30,
+                    expect_reply=False,
+                )
+
+                receipt = provider.deliver(envelope)
+
+                self.assertEqual(receipt.status, "delivered")
+                payload = CaptureHandler.payloads[-1]
+                self.assertIn("status update", payload["prompt"])
+                self.assertIn("[cc-relay notice_id=notice-1]", payload["prompt"])
+                self.assertNotIn("[cc-relay request_id=notice-1]", payload["prompt"])
+                self.assertNotIn("[cc-relay reply_to=notice-1]", payload["prompt"])
             finally:
                 server.shutdown()
                 thread.join()

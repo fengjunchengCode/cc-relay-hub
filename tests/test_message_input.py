@@ -19,6 +19,13 @@ class MessageInputTest(unittest.TestCase):
 
         self.assertEqual(hub._resolve_message_input(args), "hello")
 
+    def test_no_reply_flag_is_available_for_send(self):
+        args = hub.parse_args(["send", "claude-bot", "hello", "--no-reply"])
+
+        self.assertTrue(args.no_reply)
+        self.assertFalse(args.wait)
+        self.assertEqual(hub._resolve_message_input(args), "hello")
+
     def test_stdin_preserves_multiline_message(self):
         args = hub.parse_args(["send", "claude-bot", "--stdin"])
 
@@ -44,6 +51,11 @@ class MessageInputTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             hub._resolve_message_input(args)
+
+    def test_no_reply_rejects_wait_combination_before_registry_access(self):
+        args = hub.parse_args(["send", "claude-bot", "hello", "--no-reply", "--wait"])
+
+        self.assertEqual(hub.cmd_send(args), 1)
 
 
 if __name__ == "__main__":

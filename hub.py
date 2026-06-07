@@ -39,6 +39,8 @@ REGISTRY_PATH = HUB_DIR / "registry.json"
 BINDINGS_PATH = HUB_DIR / "bindings.json"
 LEGACY_CONFIG_PATH = HUB_DIR / "config.json"
 STATE_DB_PATH = HUB_DIR / "state.db"
+SOURCE_DIR = Path(__file__).resolve().parent
+SOURCE_TEMPLATE_DIR = SOURCE_DIR / "templates"
 
 
 def parse_args(argv):
@@ -53,6 +55,7 @@ def parse_args(argv):
     send_parser.add_argument("agent")
     _add_message_input_args(send_parser)
     send_parser.add_argument("--wait", action="store_true")
+    send_parser.add_argument("--no-reply", action="store_true", help="Send a notice without a reply marker or pending session lock")
     send_parser.add_argument("--timeout", type=int, default=300)
     send_parser.add_argument("--group", default=None, help="Target group for agent lookup")
     send_parser.add_argument("--origin-project", default=None, help=argparse.SUPPRESS)
@@ -812,12 +815,22 @@ def cmd_bootstrap(args):
 # Each adapter: (filename, generator_fn(registry, bindings, agent_name) -> str or None)
 
 def _hub_command():
+    if os.name == "nt":
+        cmd = HUB_DIR / "bin" / "cc-relay-hub.cmd"
+        if cmd.exists() or not HUB_BIN.exists():
+            return str(cmd)
     return str(HUB_BIN)
+
+
+def _agents_template_path():
+    source_template = SOURCE_TEMPLATE_DIR / "AGENTS.md"
+    if source_template.exists():
+        return source_template
+    return HUB_DIR / "templates" / "AGENTS.md"
 
 
 def _routing_contract_lines(agent_name=None):
     cmd = _hub_command()
-    relay_from = agent_name or "<from-agent>"
     return [
         "## Message Routing Contract",
         "",
@@ -834,10 +847,17 @@ def _routing_contract_lines(agent_name=None):
         "```bash",
         "%s list --format json" % cmd,
         "%s info <agent>" % cmd,
-        "%s send <agent> \"task\" --wait --timeout 120" % cmd,
-        "Get-Content task.md -Raw | %s send <agent> --stdin --wait --timeout 120" % cmd,
-        "%s relay %s <to-agent> \"task\" --timeout 120" % (cmd, relay_from),
+        "%s send <agent> \"task\"" % cmd,
+        "Get-Content task.md -Raw | %s send <agent> --stdin" % cmd,
+        "%s send <agent> \"status update\" --no-reply" % cmd,
         "```",
+        "",
+        "Private message reply policy:",
+        "- Before sending, decide whether the message needs a reply.",
+        "- If a reply is needed, use `send` without `--wait`; the target agent must answer with `[cc-relay reply_to=...]`, and the hook server forwards that reply back to the origin session.",
+        "- If no reply is needed, use `send --no-reply`; the target must not answer only to acknowledge it.",
+        "- Do not use `cc-relay-hub watch`, `watch --loop`, shell polling, or `send --wait` to wait for private-message replies unless the user explicitly asks for a synchronous diagnostic wait.",
+        "- Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.",
         "",
         "For multiline or long messages, use `--stdin` or `--message-file`; do not pass a PowerShell multiline variable as the quoted positional MESSAGE on Windows.",
         "Use cc-connect relay only for cc-connect's group-chat relay feature after a chat has been bound with /bind.",
@@ -881,7 +901,7 @@ def _generate_agents_md(registry, bindings, agent_name):
     lines.extend(_routing_contract_lines(agent_name))
 
     # Static body from template (NOT from generated output)
-    template = HUB_DIR / "templates" / "AGENTS.md"
+    template = _agents_template_path()
     if template.exists():
         content = template.read_text(encoding="utf-8")
         # Skip the first heading (we already wrote our own)
@@ -905,11 +925,12 @@ def _generate_claude_md(registry, bindings, agent_name):
     lines.append("```bash")
     lines.append("cc-relay-hub list")
     lines.append("cc-relay-hub info <agent>")
-    lines.append("cc-relay-hub send <agent> \"message\" --wait --timeout 120")
-    lines.append("Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait --timeout 120")
+    lines.append("cc-relay-hub send <agent> \"message\"")
+    lines.append("Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin")
+    lines.append("cc-relay-hub send <agent> \"status update\" --no-reply")
     lines.append("cc-relay-hub cdp status <cdp-agent>")
     lines.append("cc-relay-hub groups")
-    lines.append("cc-relay-hub relay <from> <to> \"message\"")
+    lines.append("# Use --wait only when the user explicitly asks for a synchronous diagnostic wait.")
     lines.append("```\n")
 
     if agent_name:
@@ -932,12 +953,12 @@ def _generate_claude_md(registry, bindings, agent_name):
     ]
     if cdp_agents:
         lines.append("\n## CDP IDE Agents\n")
-        lines.append("CDP-backed IDE agents are still contacted with `send --wait`; the hub writes into the IDE Agent chat through localhost CDP and reads the visible transcript.")
+        lines.append("CDP-backed IDE agents are contacted with `send`; the hub writes into the IDE Agent chat through localhost CDP. Use `--wait` only when the user explicitly asks for a synchronous diagnostic wait.")
         lines.append("")
         lines.append("```bash")
         lines.append("cc-relay-hub info %s" % cdp_agents[0])
         lines.append("cc-relay-hub cdp status %s" % cdp_agents[0])
-        lines.append("cc-relay-hub send %s \"task\" --wait --timeout 120" % cdp_agents[0])
+        lines.append("cc-relay-hub send %s \"task\"" % cdp_agents[0])
         lines.append("```")
         lines.append("")
         lines.append("- Empty `Session` and `Last Seen: never` are normal for CDP agents.")
@@ -948,6 +969,8 @@ def _generate_claude_md(registry, bindings, agent_name):
     lines.append("\n## Key Facts\n")
     lines.append("- `send` is provider-aware: cc-connect agents use local webhook HTTP POST; CDP agents use localhost Chrome DevTools Protocol.")
     lines.append("- Use `--stdin` or `--message-file` for multiline or long tasks, especially on Windows.")
+    lines.append("- Default private messages are asynchronous: do not open a listener or block waiting for replies unless explicitly asked.")
+    lines.append("- Use `--no-reply` for notifications or acknowledgements that should not trigger another response.")
     lines.append("- CDP agents use virtual session key `cdp:<agent_name>`.")
     lines.append("- Hook-server long-poll: `GET http://127.0.0.1:9120/events/longpoll`")
     lines.append("- When receiving relay markers, reply with the same marker.")
@@ -974,13 +997,16 @@ def _generate_cursor_rules(registry, bindings, agent_name):
     lines.append("")
     lines.append("## Commands")
     lines.append("- List agents: `%s list --format json`" % _hub_command())
-    lines.append("- Send message: `%s send <agent> \"msg\" --wait`" % _hub_command())
-    lines.append("- Send multiline message: `Get-Content task.md -Raw | %s send <agent> --stdin --wait`" % _hub_command())
+    lines.append("- Send message: `%s send <agent> \"msg\"`" % _hub_command())
+    lines.append("- Send multiline message: `Get-Content task.md -Raw | %s send <agent> --stdin`" % _hub_command())
+    lines.append("- Send no-reply notice: `%s send <agent> \"msg\" --no-reply`" % _hub_command())
     lines.append("- Check health: `%s info <agent>`" % _hub_command())
     lines.append("")
     lines.append("## Rules")
     lines.append("- Never hardcode agent names. Discover with `%s list --format json`." % _hub_command())
     lines.append("- Check agent health before sending work.")
+    lines.append("- Do not use watch, watch --loop, shell polling, or send --wait to wait for private-message replies unless explicitly asked.")
+    lines.append("- Before sending, decide whether a reply is needed; use --no-reply for notices.")
     lines.append("- When receiving relay markers, reply with the same marker.")
     return "\n".join(lines)
 
@@ -1247,6 +1273,9 @@ def cmd_send(args):
     except ValueError as exc:
         print("Error: %s" % exc)
         return 1
+    if getattr(args, "no_reply", False) and args.wait:
+        print("Error: --no-reply cannot be combined with --wait")
+        return 1
 
     registry, bindings = ensure_registry_and_bindings()
 
@@ -1294,6 +1323,7 @@ def cmd_send(args):
     effective_session = session_key or "cdp:%s" % agent["name"]
     request_id = uuid.uuid4().hex
     now = time.time()
+    expect_reply = not getattr(args, "no_reply", False)
     envelope = RelayEnvelope(
         request_id=request_id,
         sender="cc-relay",
@@ -1302,7 +1332,30 @@ def cmd_send(args):
         created_at=now,
         reply_to=None,
         ttl=int(args.timeout),
+        expect_reply=expect_reply,
     )
+    if not expect_reply:
+        is_control = message_body.startswith("/") and provider.supports_control()
+        if is_control:
+            result = provider.execute_command(message_body)
+            if result.status != "delivered":
+                print("Error: %s" % (result.error or "command failed"))
+                return 1
+            delivered_at = result.executed_at
+        else:
+            receipt = provider.deliver(envelope)
+            if receipt.status != "delivered":
+                print("Error: %s" % (receipt.error or "delivery failed"))
+                return 1
+            delivered_at = receipt.delivered_at
+        print("Message sent to %s (notice_id=%s body_chars=%d no_reply=true delivered_at=%.3f)" % (
+            agent["name"],
+            request_id,
+            len(envelope.body),
+            delivered_at,
+        ))
+        return 0
+
     state.insert_message(
         request_id=request_id,
         sender=envelope.sender,

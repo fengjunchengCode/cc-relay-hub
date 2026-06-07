@@ -82,10 +82,10 @@ Agents use the same request path for CDP targets as for webhook targets:
 ```bash
 cc-relay-hub info antigravity-ide
 cc-relay-hub cdp status antigravity-ide
-cc-relay-hub send antigravity-ide "Open the project and inspect the failing workflow" --wait --timeout 120
+cc-relay-hub send antigravity-ide "Open the project and inspect the failing workflow"
 ```
 
-For CDP agents, `Session` may be empty and `Last Seen` may remain `never`; this is expected because replies are read from the IDE DOM transcript rather than from the hook server. If a send times out, inspect the IDE state before retrying:
+For CDP agents, `Session` may be empty and `Last Seen` may remain `never`; this is expected because replies are read from the IDE DOM transcript rather than from the hook server. Use `send --wait` only for explicit synchronous diagnostics. If a diagnostic wait times out, inspect the IDE state before retrying:
 
 ```bash
 cc-relay-hub cdp probe antigravity-ide

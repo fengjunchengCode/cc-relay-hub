@@ -57,7 +57,8 @@ class CDPProvider(MessageProvider, ControlProvider):
             )
 
         if result == "SENT":
-            self._pending_request_id = envelope.request_id
+            if getattr(envelope, "expect_reply", True):
+                self._pending_request_id = envelope.request_id
             return DeliveryReceipt(
                 request_id=envelope.request_id,
                 status="delivered",

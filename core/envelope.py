@@ -11,6 +11,7 @@ class RelayEnvelope:
     created_at: float
     reply_to: Optional[str]
     ttl: int = 300
+    expect_reply: bool = True
 
 
 @dataclass

@@ -47,6 +47,17 @@ class BuildRelayPromptTest(unittest.TestCase):
         self.assertIn('even if the task asks you to "only reply"', prompt)
         self.assertIn("put the terse answer after the marker", prompt)
 
+    def test_no_reply_prompt_uses_notice_without_reply_marker(self):
+        envelope = _make_envelope("notice-1")
+        envelope.expect_reply = False
+        prompt = build_relay_prompt(envelope)
+
+        self.assertIn("[cc-relay notice_id=notice-1]", prompt)
+        self.assertNotIn("[cc-relay request_id=notice-1]", prompt)
+        self.assertNotIn("[cc-relay reply_to=notice-1]", prompt)
+        self.assertIn("No reply is requested", prompt)
+        self.assertIn("Do not send a message back only to acknowledge", prompt)
+
 
 class ExtractReplyFromTranscriptTest(unittest.TestCase):
     def test_marker_at_start(self):

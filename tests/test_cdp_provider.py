@@ -48,6 +48,24 @@ class CDPProviderDeliverTest(unittest.TestCase):
         self.assertIn("[cc-relay reply_to=req-123]", call_args)
 
     @patch("providers.cdp_provider.CDPProvider._ensure_backend")
+    def test_deliver_no_reply_does_not_set_pending_request(self, mock_ensure):
+        mock_backend = MagicMock()
+        mock_backend.send_message.return_value = "SENT"
+        mock_ensure.return_value = mock_backend
+
+        provider = CDPProvider("test-agent", _make_binding())
+        envelope = _make_envelope("notice-1")
+        envelope.expect_reply = False
+        receipt = provider.deliver(envelope)
+
+        self.assertEqual(receipt.status, "delivered")
+        self.assertIsNone(provider._pending_request_id)
+        call_args = mock_backend.send_message.call_args[0][0]
+        self.assertIn("[cc-relay notice_id=notice-1]", call_args)
+        self.assertNotIn("[cc-relay request_id=notice-1]", call_args)
+        self.assertNotIn("[cc-relay reply_to=notice-1]", call_args)
+
+    @patch("providers.cdp_provider.CDPProvider._ensure_backend")
     def test_deliver_returns_failed_on_send_error(self, mock_ensure):
         mock_backend = MagicMock()
         mock_backend.send_message.return_value = "NO_INPUT"

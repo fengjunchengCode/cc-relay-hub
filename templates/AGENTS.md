@@ -14,15 +14,20 @@ cc-relay-hub groups                 # list groups and members
 ## Sending Messages
 
 ```bash
-cc-relay-hub send <agent> "task description" --wait --timeout 120
-Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin --wait --timeout 120
+cc-relay-hub send <agent> "task description"
+Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin
+cc-relay-hub send <agent> "status update" --no-reply
 ```
 
 - For `cc_connect` agents, delivers via local webhook HTTP POST.
 - For `cdp` agents such as Antigravity, delivers through the local Chrome DevTools Protocol session into the IDE agent chat.
-- `--wait` blocks until the target replies or timeout.
 - Always check `info <agent>` before sending.
-- If `info` shows `Provider: cdp`, still use `cc-relay-hub send <agent> "task" --wait`; do not switch to `cc-connect relay`.
+- Before sending, decide whether the message needs a reply.
+- If a reply is needed, use `send` without `--wait`; the target replies with `[cc-relay reply_to=...]`, and the hook server forwards that reply back to the origin session.
+- If no reply is needed, use `send --no-reply`; the target must not answer only to acknowledge it.
+- Do not use `cc-relay-hub watch`, `watch --loop`, shell polling, or `send --wait` to wait for private-message replies unless the user explicitly asks for a synchronous diagnostic wait.
+- Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.
+- If `info` shows `Provider: cdp`, still use `cc-relay-hub send <agent> "task"`; do not switch to `cc-connect relay`.
 - For multiline or long tasks, use `--stdin` or `--message-file`; on Windows, do not pass a PowerShell multiline variable as positional `"task"`.
 
 ## CDP IDE Agents
@@ -32,7 +37,7 @@ CDP-backed agents are IDE windows controlled through localhost CDP. Antigravity 
 ```bash
 cc-relay-hub info antigravity-ide
 cc-relay-hub cdp status antigravity-ide
-cc-relay-hub send antigravity-ide "task description" --wait --timeout 120
+cc-relay-hub send antigravity-ide "task description"
 ```
 
 Use diagnostics only when needed:
@@ -45,7 +50,7 @@ cc-relay-hub cdp screenshot antigravity-ide --path /tmp/antigravity.png
 ```
 
 - `Last Seen: never` is normal for CDP agents because replies are read from the IDE DOM, not from the hook server.
-- If `send --wait` times out, run `cdp status`, `cdp probe`, and `cdp screenshot` before retrying.
+- Use `send --wait` only when the user explicitly asks for a synchronous diagnostic wait. If it times out, run `cdp status`, `cdp probe`, and `cdp screenshot` before retrying.
 - Keep CDP ports bound to `127.0.0.1`; never expose the debugging port to a network.
 
 ## Delivering Images/Files to the End User (Feishu)
@@ -113,6 +118,7 @@ cc-relay-hub relay <from> <to> "task" --timeout 120
 
 - Sends from one agent to another within the same group.
 - Always waits for reply.
+- Do not use this command for routine private messages from an agent conversation; prefer asynchronous `send`.
 
 ## Relay Protocol
 
@@ -133,8 +139,8 @@ Check your group: `cc-relay-hub list --format json`
 
 - Never hardcode agent names. Discover with `cc-relay-hub list`.
 - Do not send messages across groups. Treat ungrouped agents as separate from named groups; exact agent names do not bypass group isolation.
-- Never use shell polling loops (`tail -f`, `while true`, `sleep`).
-- Use `cc-relay-hub send --wait` for request/reply.
+- Never use shell polling loops (`tail -f`, `while true`, `sleep`) or long-running listeners to wait for replies.
+- Use plain `cc-relay-hub send` for request/reply; use `--no-reply` for notices; use `--wait` only when explicitly requested.
 - Check agent health before sending work.
 
 ## Agent Name Resolution

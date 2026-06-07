@@ -15,11 +15,13 @@ cc-connect project A  -- cc-relay-hub send -->  cc-connect project B
             and forwards reply to project A
 ```
 
-1. Agent A calls `cc-relay-hub send <agent> "<task>"`.
+1. Agent A calls `cc-relay-hub send <agent> "<task>"` and returns immediately.
 2. cc-relay-hub discovers Agent B from the local registry and binding files.
 3. The task is delivered through Agent B's local cc-connect webhook.
 4. Agent B replies; cc-connect emits a `message.sent` hook.
 5. cc-relay-hub matches the reply to the original request and sends it back to Agent A's session.
+
+Agents should not open listeners or use `send --wait` to wait for private-message replies unless a human explicitly requests a synchronous diagnostic wait. If a private message does not need a reply, the sender uses `cc-relay-hub send <agent> "<notice>" --no-reply`; the delivered prompt does not include request/reply markers and does not create a pending session lock.
 
 ## CDP Flow
 
@@ -62,6 +64,8 @@ Relay requests include a request marker and a reply marker instruction. The targ
 ```
 
 The relay core uses this marker to associate a reply with the original request. This is especially important for CDP transcripts, where the provider reads text from the IDE DOM rather than receiving a hook event.
+
+No-reply notices use `[cc-relay notice_id=<id>]` instead of request/reply markers. They are for status updates and acknowledgements that should not trigger reply-to-reply loops.
 
 ## Group-aware Resolution
 
