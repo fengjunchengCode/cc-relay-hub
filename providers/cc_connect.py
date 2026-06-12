@@ -1,5 +1,6 @@
 import glob
 import json
+import os
 import socket
 import time
 import urllib.error
@@ -160,7 +161,14 @@ class CCConnectProvider(MessageProvider, ControlProvider):
         matches = glob.glob(str(Path.home() / ".cc-connect" / "sessions" / ("%s_*.json" % self.agent_id)))
         if not matches:
             return None
-        return Path(matches[0])
+        # An agent accumulates several session files as it is re-initialized over
+        # time (codex-bot_<hash>.json). glob order is arbitrary, so matches[0] can
+        # be a stale, dead session — making the hub poll the wrong file and miss
+        # replies entirely (a --wait times out even though the agent answered
+        # correctly with the reply marker). Pick the most recently modified file,
+        # which is the active session currently being written to.
+        newest = max(matches, key=os.path.getmtime)
+        return Path(newest)
 
     def _has_required_hook(self):
         config_path = self.binding.get("config_path")

@@ -1,5 +1,6 @@
 import http.server
 import json
+import os
 import socketserver
 import sys
 import tempfile
@@ -36,6 +37,35 @@ class CCConnectProviderTest(unittest.TestCase):
     def test_parse_timestamp_accepts_variable_precision_offset(self):
         parsed = _parse_timestamp("2026-05-05T20:47:34.03814+08:00")
         self.assertGreater(parsed, 0.0)
+
+    def test_session_file_picks_most_recent_when_multiple_exist(self):
+        # An agent accumulates several session files as it is re-initialized over
+        # time. glob order is arbitrary, so the provider must pick the active
+        # (most recently modified) one — otherwise the hub polls a stale, dead
+        # session file and misses replies entirely (--wait times out even though
+        # the agent answered correctly).
+        with tempfile.TemporaryDirectory() as home:
+            sessions = Path(home) / ".cc-connect" / "sessions"
+            sessions.mkdir(parents=True)
+            stale = sessions / "codex-bot_aaaaaaaa.json"
+            active = sessions / "codex-bot_zzzzzzzz.json"
+            stale.write_text("{}", encoding="utf-8")
+            active.write_text("{}", encoding="utf-8")
+            os.utime(stale, (1000.0, 1000.0))
+            os.utime(active, (2000.0, 2000.0))
+
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                provider = CCConnectProvider("codex-bot", {"session_key": "feishu:s:u"})
+                resolved = provider._session_file()
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+
+            self.assertEqual(resolved, active)
 
     def test_deliver_posts_webhook_payload(self):
         with tempfile.TemporaryDirectory():
