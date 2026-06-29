@@ -30,6 +30,30 @@ python3 <repo>/bin/feishu-send.py --file  /abs/report.pdf                       
 `<repo>` is this cc-relay-hub checkout (the script lives at `bin/feishu-send.py`).
 Pure stdlib, no dependencies. On success each line prints `... -> 0 success`.
 
+## Mentioning the user
+
+Plain text such as `@冯均成` is only text in Feishu; it does **not** trigger a
+notification mention. When a user asks to be mentioned, send a Feishu `post`
+message with an `at` tag before or alongside the attachment:
+
+```json
+{
+  "zh_cn": {
+    "title": "",
+    "content": [[
+      {"tag": "at", "user_id": "<open_id>", "user_name": "冯均成"},
+      {"tag": "text", "text": " 组件预览已发，请验收"}
+    ]]
+  }
+}
+```
+
+Send it with `POST /open-apis/im/v1/messages?receive_id_type=open_id`,
+`msg_type:"post"`, and `receive_id:<open_id>`. In a live cc-connect Feishu
+session, the open id is the third segment of
+`CC_SESSION_KEY=feishu:<chat_id>:<open_id>`. After the real mention post is
+sent, send images/videos/files with `bin/feishu-send.py` as usual.
+
 ## How it resolves credentials & target (nothing hardcoded)
 
 - **app_id / app_secret** — read from `~/.cc-connect/config.toml` for the project

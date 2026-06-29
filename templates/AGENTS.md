@@ -110,6 +110,27 @@ PY
 - For non-image files: upload via `POST /open-apis/im/v1/files` (multipart `file_type` +
   `file`) to get a `file_key`, then send with `msg_type:"file"`, `content:{"file_key":...}`.
 
+**Real Feishu mentions.** Plain text like `@冯均成` does not notify the user. To
+trigger a real mention, send a Feishu `post` message by `open_id` with an `at`
+tag, then send attachments normally:
+
+```json
+{
+  "zh_cn": {
+    "title": "",
+    "content": [[
+      {"tag": "at", "user_id": "<open_id>", "user_name": "冯均成"},
+      {"tag": "text", "text": " 预览已发，请验收"}
+    ]]
+  }
+}
+```
+
+Use `POST /open-apis/im/v1/messages?receive_id_type=open_id`,
+`msg_type:"post"`, `receive_id:<open_id>`. In a live Feishu session, parse the
+open id from `CC_SESSION_KEY=feishu:<chat_id>:<open_id>`. Do not rely on plain
+text `@...` for notification.
+
 ## Relay (Agent-to-Agent)
 
 ```bash
