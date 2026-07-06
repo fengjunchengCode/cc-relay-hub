@@ -565,6 +565,12 @@ def _send_via_origin_webhook(origin_project, origin_session, binding, content):
     webhook_binding = dict(binding)
     webhook_binding["session_key"] = origin_session
     provider = CCConnectProvider(origin_project, webhook_binding)
+    # This is a reply *notification*, not a new request: expect_reply must be
+    # False so build_relay_prompt frames it as a notice. With the default
+    # (request framing) the origin is ordered to answer with a reply marker
+    # whose request_id was never registered in state.db, so its answer is
+    # dropped as "unmatched" — the origin believes it replied, the target
+    # never hears back, and the relay thread dies silently.
     receipt = provider.deliver(
         RelayEnvelope(
             request_id=uuid.uuid4().hex,
@@ -574,6 +580,7 @@ def _send_via_origin_webhook(origin_project, origin_session, binding, content):
             created_at=time.time(),
             reply_to=None,
             ttl=30,
+            expect_reply=False,
         )
     )
     if receipt.status != "delivered":

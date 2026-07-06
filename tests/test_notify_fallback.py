@@ -259,6 +259,45 @@ class NotifyFallbackTest(unittest.TestCase):
         self.assertEqual(result["status"], "matched")
         self.assertIn(result["notify"]["status"], ("sent", "failed"))
 
+    def test_origin_webhook_notification_is_notice_not_request(self):
+        """The reply forwarded to the origin must be a notice (expect_reply
+        False). With request framing the origin is ordered to answer with a
+        reply marker whose request_id was never registered in state.db, so
+        its answer is dropped as unmatched and the relay thread dies
+        silently while the origin believes it replied."""
+        from core.envelope import DeliveryReceipt
+        from core.relay_protocol import build_relay_prompt
+
+        captured = {}
+
+        class ProviderStub(object):
+            def __init__(self, agent_id, binding):
+                captured["agent_id"] = agent_id
+
+            def deliver(self, envelope):
+                captured["envelope"] = envelope
+                return DeliveryReceipt(
+                    request_id=envelope.request_id,
+                    status="delivered",
+                    provider="cc_connect",
+                    delivered_at=12.0,
+                )
+
+        with mock.patch.object(hub, "CCConnectProvider", ProviderStub):
+            result = hub._send_via_origin_webhook(
+                "codex-bot",
+                "feishu:origin:u1",
+                {"webhook_port": 9999, "session_key": "feishu:origin:u1"},
+                "[cc-relay:claude-bot]\npong",
+            )
+
+        self.assertEqual(result["status"], "sent")
+        envelope = captured["envelope"]
+        self.assertFalse(envelope.expect_reply)
+        prompt = build_relay_prompt(envelope)
+        self.assertIn("notice_id=", prompt)
+        self.assertNotIn("request_id=", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
