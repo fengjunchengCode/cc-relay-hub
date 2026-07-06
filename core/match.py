@@ -3,13 +3,27 @@ import re
 
 
 _REPLY_MARKER_RE = re.compile(r"^\s*\[cc-relay\s+reply_to=([A-Za-z0-9_.:-]+)\]\s*")
+# Agents sometimes emit prose before the reply marker; accept a marker anywhere
+# in the message so those replies are not dropped as "missing_relay_marker".
+_REPLY_MARKER_ANYWHERE_RE = re.compile(r"\[cc-relay\s+reply_to=([A-Za-z0-9_.:-]+)\]\s*")
 
 
 def parse_relay_reply(content):
-    match = _REPLY_MARKER_RE.match(content or "")
+    text = content or ""
+    match = _REPLY_MARKER_RE.match(text)
+    if match:
+        reply = text[match.end():].lstrip("\r\n")
+        return {
+            "request_id": match.group(1),
+            "content": reply,
+        }
+    match = _REPLY_MARKER_ANYWHERE_RE.search(text)
     if not match:
         return None
-    reply = content[match.end():].lstrip("\r\n")
+    preamble = text[:match.start()].strip()
+    reply = text[match.end():].lstrip("\r\n")
+    if preamble:
+        reply = preamble + "\n\n" + reply if reply else preamble
     return {
         "request_id": match.group(1),
         "content": reply,

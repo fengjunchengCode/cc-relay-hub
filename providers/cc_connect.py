@@ -184,9 +184,14 @@ class CCConnectProvider(MessageProvider, ControlProvider):
                 continue
             if hook.get("type") != "http":
                 continue
-            if hook.get("url") == "http://127.0.0.1:9120/cc-connect/hooks/reply":
+            if _is_relay_reply_hook_url(hook.get("url", "")):
                 return True
         return False
+
+
+def _is_relay_reply_hook_url(url):
+    """Accept the relay hook on whichever localhost port this install uses."""
+    return url.startswith("http://127.0.0.1:") and url.endswith("/cc-connect/hooks/reply")
 
 
 def _parse_timestamp(value):
