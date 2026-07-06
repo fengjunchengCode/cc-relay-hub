@@ -41,6 +41,7 @@ LEGACY_CONFIG_PATH = HUB_DIR / "config.json"
 STATE_DB_PATH = HUB_DIR / "state.db"
 SOURCE_DIR = Path(__file__).resolve().parent
 SOURCE_TEMPLATE_DIR = SOURCE_DIR / "templates"
+DEFAULT_HOOK_PORT = int(os.environ.get("CC_RELAY_HOOK_PORT") or os.environ.get("HOOK_PORT") or "9121")
 
 
 def parse_args(argv):
@@ -593,16 +594,20 @@ def notify_origin_reply(message, reply_text, bindings=None, runner=None):
 
     content = _build_notification_content(message, reply_text)
     runner = runner or _run_cc_connect_send
+    # Webhook first: it injects the reply into the origin agent conversation
+    # (prompt via cc-connect /hook). `cc-connect send` only posts an outbound
+    # message to the user-facing chat, so the origin agent never sees it —
+    # keep it strictly as a fallback delivery.
+    webhook = _send_via_origin_webhook(origin_project, origin_session, binding, content)
+    if webhook["status"] == "sent":
+        return webhook
     notify = _send_via_origin_config(origin_project, origin_session, binding, content, runner)
-    if notify["status"] == "sent":
+    if notify["status"] in ("sent", "failed"):
         return notify
-    if notify["status"] == "failed":
-        return notify
-    # retryable or config_missing → try webhook fallback
-    result = _send_via_origin_webhook(origin_project, origin_session, binding, content)
-    if result["status"] == "skipped":
-        return {"status": "failed", "error": "webhook fallback unavailable: %s" % result.get("reason", "unknown")}
-    return result
+    # config skipped (missing/retryable) and webhook did not deliver
+    if webhook["status"] == "failed":
+        return webhook
+    return {"status": "failed", "error": "webhook fallback unavailable: %s" % notify.get("reason", "unknown")}
 
 
 def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
@@ -972,7 +977,7 @@ def _generate_claude_md(registry, bindings, agent_name):
     lines.append("- Default private messages are asynchronous: do not open a listener or block waiting for replies unless explicitly asked.")
     lines.append("- Use `--no-reply` for notifications or acknowledgements that should not trigger another response.")
     lines.append("- CDP agents use virtual session key `cdp:<agent_name>`.")
-    lines.append("- Hook-server long-poll: `GET http://127.0.0.1:9120/events/longpoll`")
+    lines.append("- Hook-server long-poll: `GET http://127.0.0.1:%d/events/longpoll`" % DEFAULT_HOOK_PORT)
     lines.append("- When receiving relay markers, reply with the same marker.")
     return "\n".join(lines)
 
@@ -1440,7 +1445,7 @@ def cmd_watch(args):
     uses a single process -- no shell while-loop needed.
     """
     hook_host = "127.0.0.1"
-    hook_port = 9120
+    hook_port = DEFAULT_HOOK_PORT
     since = args.since or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     timeout_sec = max(1, min(args.timeout, 60))
     loop = args.loop

@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,50 @@ class NotifyFallbackTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmpdir.cleanup()
+
+    def test_webhook_injection_preferred_over_config_send(self):
+        """Webhook must be tried first: it injects the reply into the origin
+        agent conversation, while `cc-connect send` only posts to the
+        user-facing chat and the origin agent never sees the reply."""
+        cli_calls = []
+
+        def runner(command, input_text):
+            cli_calls.append(command)
+            return CompletedProcessStub()
+
+        with mock.patch.object(
+            hub,
+            "_send_via_origin_webhook",
+            return_value={"status": "sent", "via": "webhook"},
+        ) as webhook_mock:
+            result = hub.handle_hook_event(
+                {
+                    "event": "message.sent",
+                    "project": "claude-bot",
+                    "session_key": "feishu:target:u1",
+                    "content": "[cc-relay reply_to=req-1]\npong",
+                    "timestamp": "2026-05-06T10:00:00+08:00",
+                },
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {
+                            "config_path": "/tmp/config-codex.toml",
+                            "webhook_port": 9999,
+                            "webhook_host": "127.0.0.1",
+                            "webhook_path": "/hook",
+                        },
+                    }
+                },
+                runner=runner,
+            )
+
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["notify"]["status"], "sent")
+        self.assertEqual(result["notify"].get("via"), "webhook")
+        webhook_mock.assert_called_once()
+        # config send must not fire when webhook injection succeeded
+        self.assertEqual(cli_calls, [])
 
     def test_retryable_error_falls_back_to_webhook(self):
         """Daemon-already-running error should fall back to webhook."""
