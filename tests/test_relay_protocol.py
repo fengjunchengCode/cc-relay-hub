@@ -55,8 +55,9 @@ class BuildRelayPromptTest(unittest.TestCase):
         self.assertIn("[cc-relay notice_id=notice-1]", prompt)
         self.assertNotIn("[cc-relay request_id=notice-1]", prompt)
         self.assertNotIn("[cc-relay reply_to=notice-1]", prompt)
-        self.assertIn("No reply is requested", prompt)
-        self.assertIn("Do not send a message back only to acknowledge", prompt)
+        self.assertIn("No reply is requested back to the sending agent", prompt)
+        self.assertIn("Never end that turn with NO_REPLY, an empty response", prompt)
+        self.assertIn("give the user a concise progress/result update", prompt)
 
 
 class ExtractReplyFromTranscriptTest(unittest.TestCase):

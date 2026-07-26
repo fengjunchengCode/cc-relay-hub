@@ -73,7 +73,7 @@ Relay requests include a request marker and a reply marker instruction. The targ
 
 The relay core uses this marker to associate a reply with the original request. This is especially important for CDP transcripts, where the provider reads text from the IDE DOM rather than receiving a hook event.
 
-No-reply notices use `[cc-relay notice_id=<id>]` instead of request/reply markers. They are for status updates and acknowledgements that should not trigger reply-to-reply loops.
+No-reply notices use `[cc-relay notice_id=<id>]` instead of request/reply markers. They do not trigger reply-to-reply loops, but they still open an assistant turn in the origin conversation. The runtime prompt therefore forbids an empty/`NO_REPLY` final and requires a concise user-facing progress/result update. Pending notices for the same origin session are coalesced in FIFO order into one webhook delivery so a backlog cannot create a chain of synthetic blank turns.
 
 ## Busy-session delivery and acknowledgement
 

@@ -385,7 +385,7 @@ class NotifyFallbackTest(unittest.TestCase):
         )
         self.assertEqual(self.store.get_message("req-1")["notified_at"], 20.0)
 
-    def test_outbox_preserves_fifo_when_origin_is_still_busy(self):
+    def test_outbox_coalesces_same_session_fifo_into_one_attempt(self):
         base = {
             "request_id": "req-1",
             "origin_project": "codex-bot",
@@ -419,10 +419,69 @@ class NotifyFallbackTest(unittest.TestCase):
             )
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual([item["id"] for item in drained], [first["id"]])
+        self.assertEqual(
+            [item["id"] for item in drained],
+            [first["id"], second["id"]],
+        )
+        batch_content = calls[0][0][3]
+        self.assertLess(batch_content.index("first"), batch_content.index("second"))
+        self.assertIn(
+            "[cc-relay notice_id=%s]" % hub._notification_notice_id(first),
+            batch_content,
+        )
+        self.assertIn(
+            "[cc-relay notice_id=%s]" % hub._notification_notice_id(second),
+            batch_content,
+        )
         self.assertEqual(
             self.store.get_notification(second["id"])["attempts"],
-            0,
+            1,
+        )
+        self.assertEqual(drained[0]["batch_size"], 2)
+        self.assertEqual(drained[1]["batch_size"], 2)
+
+    def test_successful_batch_delivers_all_items_in_one_synthetic_turn(self):
+        base = {
+            "request_id": "req-1",
+            "origin_project": "codex-bot",
+            "origin_session_key": "feishu:origin:u1",
+            "target": "claude-bot",
+        }
+        first = hub.enqueue_reply_notification(
+            self.store, base, "first result", now=10.0
+        )
+        second = hub.enqueue_reply_notification(
+            self.store, base, "second result", label="follow-up", now=11.0
+        )
+
+        with mock.patch.object(
+            hub,
+            "_send_via_origin_webhook",
+            return_value={"status": "sent", "via": "webhook"},
+        ) as webhook_mock:
+            drained = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=12.0,
+            )
+
+        webhook_mock.assert_called_once()
+        self.assertEqual(
+            [item["status"] for item in drained],
+            ["delivered", "delivered"],
+        )
+        self.assertEqual(
+            self.store.get_notification(first["id"])["status"],
+            "delivered",
+        )
+        self.assertEqual(
+            self.store.get_notification(second["id"])["status"],
+            "delivered",
         )
 
     def test_known_busy_session_is_queued_without_webhook_probe(self):
