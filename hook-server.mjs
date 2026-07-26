@@ -186,10 +186,11 @@ function forwardToHub(payload) {
 // cc-connect v1.3 acknowledges /hook with HTTP 200 before it checks whether
 // the target agent session is already running. If it is, the daemon logs
 // "session busy, queued prompt dropped" and discards the prompt. hub.py keeps
-// those reply notifications in SQLite. Every message.sent event is a useful
-// idle edge for that exact project/session, including ordinary final turns
-// that are not relay replies, so drain its queue shortly after the hook
-// returns.
+// those reply notifications in SQLite. Every message.sent event is the
+// authoritative idle edge for that exact project/session, including ordinary
+// final turns that are not relay replies, so drain its queue shortly after the
+// hook returns. hub.py still checks the newest persisted history role before
+// POSTing and allows only one attempt per idle generation.
 // ---------------------------------------------------------------------------
 const IDLE_DRAIN_DELAY_MS = parseInt(process.env.IDLE_DRAIN_DELAY_MS || "900", 10);
 const STARTUP_DRAIN_DELAY_MS = parseInt(
@@ -241,8 +242,15 @@ function scheduleNotificationDrain(event) {
 // unsolicited turns, so a long task's final report (valid marker and all)
 // bypasses this server entirely. Sweeping session history via `hub.py
 // reconcile` recovers those replies; the hook remains the fast path.
+//
+// Reconcile deliberately does not drain the notification outbox. Mixing reply
+// discovery with delivery caused a busy origin to be probed every 45 seconds.
 // ---------------------------------------------------------------------------
 const RECONCILE_INTERVAL = parseInt(process.env.RECONCILE_INTERVAL_SECS || "45", 10);
+const OUTBOX_WATCHDOG_INTERVAL = parseInt(
+  process.env.OUTBOX_WATCHDOG_INTERVAL_SECS || "300",
+  10,
+);
 let reconcileRunning = false;
 
 function runReconcile() {
@@ -267,12 +275,20 @@ function runReconcile() {
   });
   child.on("exit", () => {
     reconcileRunning = false;
-    runNotificationDrain(null, null, false);
   });
 }
 
 if (RECONCILE_INTERVAL > 0) {
   setInterval(runReconcile, RECONCILE_INTERVAL * 1000).unref();
+}
+
+// Low-frequency recovery only. The provider's busy preflight and idle-token
+// gate make this a missed-edge/startup safety net, not a polling delivery loop.
+if (OUTBOX_WATCHDOG_INTERVAL > 0) {
+  setInterval(
+    () => runNotificationDrain(null, null, false),
+    OUTBOX_WATCHDOG_INTERVAL * 1000,
+  ).unref();
 }
 
 http.createServer((req, res) => {

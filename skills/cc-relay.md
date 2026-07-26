@@ -17,7 +17,7 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - When you receive `[cc-relay request_id=...]`, always reply with `[cc-relay reply_to=...]`; never answer `NO_REPLY` or omit the marker because the task says "only reply X".
 - Before sending a private message, decide whether a reply is needed. Use plain `send` for requests that need a result, and `send --no-reply` for notifications or acknowledgements.
 - Do not open listeners, run `watch`, run `watch --loop`, use shell polling, raw long-poll HTTP, or use `send --wait` to wait for a private-message reply unless the user explicitly asks for a synchronous diagnostic wait.
-- Replies to a busy origin session are persisted and retried automatically after its next final turn. Use `cc-relay-hub inbox` only for diagnostics; do not poll it.
+- Replies to a busy origin session are persisted without probing its webhook, then retried once after its next final turn. Use `cc-relay-hub inbox` only for diagnostics; do not poll it.
 - Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.
 
 ## Routing Contract
@@ -136,8 +136,9 @@ Instead use:
 
 - Reply monitoring depends on the local hook server and `message.sent` hooks being configured in cc-connect.
 - HTTP 200 from cc-connect is transport acceptance only. cc-relay-hub confirms
-  delivery by finding the unique relay marker in session history; otherwise
-  the reply remains visible in `inbox` and is retried.
+  delivery by finding the unique relay marker in session history. Before
+  POSTing, the hub also checks the newest persisted role (`user` = busy,
+  `assistant` = idle) and allows only one attempt per idle generation.
 - If `info` or `list` shows `session_key` as empty or `none`, send one normal chat message to that bot in its own chat window, then rerun discovery.
 - For CDP agents, an empty `session_key` is expected; use `cc-relay-hub cdp status <agent>` for health instead.
 - The hook server's long-poll endpoint (`GET /events/longpoll`) holds the HTTP connection open until events arrive. This is the correct way to wait for events without polling.

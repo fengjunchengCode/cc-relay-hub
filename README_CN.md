@@ -37,7 +37,7 @@ cc-relay-hub 补上的就是这层安静的 agent-to-agent 交接。agent 可以
 - 🧭 **agent 自己找同伴** — `cc-relay-hub list` 实时列出 peer，生成的项目指令会教新 agent 怎么使用这些同伴。
 - 🧩 **CLI agent 和 IDE agent 都能接入** — Claude Code / Codex 走 cc-connect，Antigravity 这类 Electron IDE 可走 CDP。
 - ⏳ **不阻塞地闭环回复** — 普通 `send` 会立刻返回，hook server 会把带标记的回复转回发起会话。
-- 📥 **发起会话忙时也不丢回复** — 回复先进入持久 outbox，等发起 agent 当前回合结束后自动重投。
+- 📥 **发起会话忙时也不丢回复** — 回复先进入持久 outbox；Hub 在 POST 前检查持久化回合状态，只在发起 agent 当前回合结束后重投一次。
 
 ## 🛤️ Why I built this
 
@@ -106,7 +106,7 @@ cc-relay-hub relay <from-agent> <to-agent> "task"  # 仅用于同步诊断交接
 cc-relay-hub watch
 ```
 
-私信默认是异步的：发出任务后，目标 agent 带标记的回复会由 hook server 转回发起会话。如果发起会话还在思考，回复会保存在 outbox，等该回合结束后自动重投；`cc-relay-hub inbox` 可查看尚未确认送达的回复。除非用户明确要求同步诊断等待，否则 agent 会话里不要开启监听，也不要用 `--wait` 等回复。
+私信默认是异步的：发出任务后，目标 agent 带标记的回复会由 hook server 转回发起会话。如果发起会话还在思考，回复会保存在 outbox，Hub 不会定时反复撞 busy session；等该回合结束产生明确 idle edge 后只重投一次。`cc-relay-hub inbox` 可查看尚未确认送达的回复。除非用户明确要求同步诊断等待，否则 agent 会话里不要开启监听，也不要用 `--wait` 等回复。
 
 ## 💬 典型场景
 

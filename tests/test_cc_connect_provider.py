@@ -67,6 +67,69 @@ class CCConnectProviderTest(unittest.TestCase):
 
             self.assertEqual(resolved, active)
 
+    def test_session_activity_uses_last_history_role_not_recency_guess(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            sessions = Path(data_dir) / "sessions"
+            sessions.mkdir()
+            session_path = sessions / "codex-bot_active.json"
+            session_path.write_text(
+                json.dumps({
+                    "sessions": {
+                        "s1": {
+                            "history": [{
+                                "role": "user",
+                                "content": "long running turn",
+                                "timestamp": "2026-07-25T10:00:00-04:00",
+                            }]
+                        }
+                    }
+                }),
+                encoding="utf-8",
+            )
+            provider = CCConnectProvider(
+                "codex-bot",
+                {
+                    "session_key": "feishu:s1:u1",
+                    "data_dir": data_dir,
+                },
+            )
+
+            busy = provider.get_session_activity()
+            self.assertEqual(busy["status"], "busy")
+            self.assertIsNone(busy["idle_token"])
+
+            data = json.loads(session_path.read_text(encoding="utf-8"))
+            data["sessions"]["s1"]["history"].append({
+                "role": "assistant",
+                "content": "final",
+                "timestamp": "2026-07-25T11:30:00-04:00",
+            })
+            session_path.write_text(json.dumps(data), encoding="utf-8")
+
+            idle = provider.get_session_activity()
+            self.assertEqual(idle["status"], "idle")
+            self.assertIn("2026-07-25T11:30:00-04:00", idle["idle_token"])
+
+    def test_session_activity_returns_unknown_for_partial_history_file(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            sessions = Path(data_dir) / "sessions"
+            sessions.mkdir()
+            (sessions / "codex-bot_active.json").write_text(
+                "{partial",
+                encoding="utf-8",
+            )
+            provider = CCConnectProvider(
+                "codex-bot",
+                {
+                    "session_key": "feishu:s1:u1",
+                    "data_dir": data_dir,
+                },
+            )
+
+            activity = provider.get_session_activity()
+            self.assertEqual(activity["status"], "unknown")
+            self.assertIsNone(activity["idle_token"])
+
     def test_deliver_posts_webhook_payload(self):
         with tempfile.TemporaryDirectory():
             CaptureHandler.payloads = []

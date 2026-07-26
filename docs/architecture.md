@@ -24,8 +24,9 @@ cc-connect project A  -- cc-relay-hub send -->  cc-connect project B
 6. The notification is injected into Agent A's session. Delivery is only
    acknowledged after its unique relay marker appears in cc-connect's session
    history.
-7. If Agent A is busy, the outbox retries after Agent A's next
-   `message.sent` event and during the periodic reconciliation sweep.
+7. If Agent A is busy, the outbox does not POST. It retries once after Agent
+   A's next `message.sent` event. Periodic reconciliation discovers missed
+   replies but does not drive notification delivery.
 
 Agents should not open listeners or use `send --wait` to wait for private-message replies unless a human explicitly requests a synchronous diagnostic wait. If a private message does not need a reply, the sender uses `cc-relay-hub send <agent> "<notice>" --no-reply`; the delivered prompt does not include request/reply markers and does not create a pending session lock.
 
@@ -81,20 +82,25 @@ whether the agent session is already processing a turn. The daemon can then log
 `session busy, queued prompt dropped` and discard the prompt. Therefore an HTTP
 response is only a transport acceptance, not a relay delivery acknowledgement.
 
-cc-relay-hub uses the unique request/notice marker as the application-level ACK:
+cc-relay-hub uses persisted turn state plus the unique request/notice marker:
 
-1. post the prompt to the local webhook;
-2. wait briefly for the marker to appear as a user entry in the target session
+1. inspect the newest persisted history role before POSTing: `user` means
+   busy, `assistant` means idle;
+2. leave a busy or unreadable session queued without touching its webhook;
+3. for an idle session, POST at most once for that idle generation;
+4. wait briefly for the marker to appear as a user entry in the target session
    history;
-3. leave reply notifications in `notification_outbox` when the marker is
+5. leave reply notifications in `notification_outbox` when the marker is
    absent;
-4. retry in FIFO order when that origin session emits its next
+6. retry in FIFO order when that origin session emits its next
    `message.sent` hook;
-5. reuse the same notice marker on every retry, so a late ACK does not create a
-   duplicate message.
+7. reuse the same notice marker and idle token, so duplicate hooks, reconcile
+   sweeps, startup scans, and late ACKs do not create another POST.
 
 Ordinary non-relay final answers are used only as idle signals. Their content is
-not copied into the relay event buffer or audit file.
+not copied into the relay event buffer or audit file. A five-minute watchdog
+exists only to recover missed idle edges or restarts; the same idle-token gate
+still prevents polling delivery.
 
 ## Group-aware Resolution
 

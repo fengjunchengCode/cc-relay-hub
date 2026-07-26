@@ -182,6 +182,53 @@ class HookServerWindowsCompatTest(unittest.TestCase):
             # the relay event stream or hook audit file.
             self.assertFalse(events_file.exists())
 
+    def test_periodic_reconcile_does_not_drive_outbox_delivery(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            fake_python = tmp / "python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"-c\" ]; then exit 0; fi\n"
+                "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
+                "cat >/dev/null\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            call_log = tmp / "calls.log"
+            port = _free_port()
+            env = dict(os.environ)
+            env["PYTHON_BIN"] = str(fake_python)
+            env["CALL_LOG"] = str(call_log)
+            env["HOOK_PORT"] = str(port)
+            env["HOOK_EVENTS_FILE"] = str(tmp / "events.jsonl")
+            env["STARTUP_DRAIN_DELAY_MS"] = "10000"
+            env["RECONCILE_INTERVAL_SECS"] = "1"
+            env["OUTBOX_WATCHDOG_INTERVAL_SECS"] = "0"
+
+            server = subprocess.Popen(
+                ["node", str(ROOT / "hook-server.mjs")],
+                cwd=str(ROOT),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertTrue(_wait_for_port(port), "hook server did not start")
+                deadline = time.time() + 2.5
+                while time.time() < deadline:
+                    if call_log.exists() and "reconcile" in call_log.read_text():
+                        break
+                    time.sleep(0.05)
+            finally:
+                server.send_signal(signal.SIGTERM)
+                server.communicate(timeout=5)
+
+            calls = call_log.read_text(encoding="utf-8")
+            self.assertIn("hub.py reconcile", calls)
+            self.assertNotIn("_drain_notifications", calls)
+
 
 if __name__ == "__main__":
     unittest.main()

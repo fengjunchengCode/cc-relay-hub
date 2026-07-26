@@ -102,9 +102,12 @@ cc-relay-hub inbox --origin-project codex-bot --format json
 ```
 
 The hook server drains this outbox automatically after each origin session's
-next `message.sent` event. It also retries during the periodic reconciliation
-sweep, so queued replies survive hook-server restarts. `inbox` is diagnostic;
-agents do not need to poll it during normal work.
+next `message.sent` event. Before POSTing it confirms that the newest persisted
+history item is an assistant final, and it permits only one attempt for that
+idle generation. The 45-second reconciliation sweep discovers missed replies
+but never drives outbox delivery. A five-minute watchdog covers missed idle
+edges and restarts while the same idle-token gate prevents repeated POSTs.
+`inbox` is diagnostic; agents do not need to poll it during normal work.
 
 Use `--stdin` or `--message-file` for multiline or long messages. This avoids Windows `.cmd` argument handling truncating a PowerShell here-string or multiline variable before cc-relay-hub receives it.
 
@@ -139,6 +142,6 @@ cc-relay-hub send antigravity-ide "Summarize the current workspace state"
 | Agent has no session | Send one normal chat message to that bot first |
 | Reply does not return | Confirm the hook server is running and the cc-connect hook URL is configured |
 | Reply is shown as queued | Run `cc-relay-hub inbox`; it will retry automatically when the origin session finishes its current turn |
-| cc-connect log says `session busy, queued prompt dropped` | Do not resend manually; confirm the reply remains in `cc-relay-hub inbox` and let the end-of-turn drain retry it |
+| cc-connect log says `session busy, queued prompt dropped` | Do not resend manually; confirm the reply remains in `cc-relay-hub inbox`. The hub will wait for the next persisted assistant final before one retry |
 | CDP agent is unreachable | Confirm the IDE was launched with a local debugging port |
 | Fuzzy agent name is ambiguous | Use exact name or `send <query> --group <group>` |

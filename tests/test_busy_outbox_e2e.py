@@ -55,16 +55,16 @@ class BusyThenAcceptHandler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
         self.__class__.payloads.append(payload)
-        # First request models cc-connect's false HTTP success followed by a
-        # busy drop. The retry is accepted and persisted in session history.
-        if len(self.__class__.payloads) >= 2:
-            data = json.loads(self.__class__.session_path.read_text(encoding="utf-8"))
-            data["sessions"]["origin"]["history"].append({
-                "role": "user",
-                "content": payload["prompt"],
-                "timestamp": "2026-07-25T10:00:00-04:00",
-            })
-            self.__class__.session_path.write_text(json.dumps(data), encoding="utf-8")
+        # The hub must reach this handler only after the persisted origin
+        # session becomes idle. Accepted delivery writes the stable notice
+        # marker into history as cc-connect does.
+        data = json.loads(self.__class__.session_path.read_text(encoding="utf-8"))
+        data["sessions"]["origin"]["history"].append({
+            "role": "user",
+            "content": payload["prompt"],
+            "timestamp": "2026-07-25T10:00:01-04:00",
+        })
+        self.__class__.session_path.write_text(json.dumps(data), encoding="utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -86,7 +86,17 @@ class BusyOutboxE2ETest(unittest.TestCase):
             sessions_dir.mkdir(parents=True)
             session_path = sessions_dir / "codex-bot_active.json"
             session_path.write_text(
-                json.dumps({"sessions": {"origin": {"history": []}}}),
+                json.dumps({
+                    "sessions": {
+                        "origin": {
+                            "history": [{
+                                "role": "user",
+                                "content": "origin turn still running",
+                                "timestamp": "2026-07-25T09:59:00-04:00",
+                            }]
+                        }
+                    }
+                }),
                 encoding="utf-8",
             )
             BusyThenAcceptHandler.payloads = []
@@ -141,6 +151,7 @@ class BusyOutboxE2ETest(unittest.TestCase):
             env["IDLE_DRAIN_DELAY_MS"] = "50"
             env["STARTUP_DRAIN_DELAY_MS"] = "10000"
             env["RECONCILE_INTERVAL_SECS"] = "0"
+            env["OUTBOX_WATCHDOG_INTERVAL_SECS"] = "0"
             env["PYTHONPATH"] = os.pathsep.join(
                 path for path in sys.path if path
             )
@@ -186,9 +197,17 @@ class BusyOutboxE2ETest(unittest.TestCase):
                             (server.poll(), hook_log.read_text(encoding="utf-8")),
                         )
                     )
-                self.assertEqual(len(BusyThenAcceptHandler.payloads), 1)
+                # Busy is checked before POST: no speculative webhook request.
+                self.assertEqual(len(BusyThenAcceptHandler.payloads), 0)
 
                 # An ordinary final answer is the origin session's idle edge.
+                data = json.loads(session_path.read_text(encoding="utf-8"))
+                data["sessions"]["origin"]["history"].append({
+                    "role": "assistant",
+                    "content": "ordinary final answer",
+                    "timestamp": "2026-07-25T10:00:00-04:00",
+                })
+                session_path.write_text(json.dumps(data), encoding="utf-8")
                 self._post_hook(
                     hook_port,
                     {
@@ -215,13 +234,9 @@ class BusyOutboxE2ETest(unittest.TestCase):
                 origin_thread.join()
                 origin_server.server_close()
 
-            self.assertEqual(len(BusyThenAcceptHandler.payloads), 2)
-            first_prompt = BusyThenAcceptHandler.payloads[0]["prompt"]
-            second_prompt = BusyThenAcceptHandler.payloads[1]["prompt"]
-            first_marker = first_prompt.splitlines()[0]
-            second_marker = second_prompt.splitlines()[0]
-            self.assertEqual(first_marker, second_marker)
-            self.assertIn("[cc-relay notice_id=outbox-", first_marker)
+            self.assertEqual(len(BusyThenAcceptHandler.payloads), 1)
+            marker = BusyThenAcceptHandler.payloads[0]["prompt"].splitlines()[0]
+            self.assertIn("[cc-relay notice_id=outbox-", marker)
             self.assertIsNotNone(store.get_message("req-e2e")["notified_at"])
 
     def _post_hook(self, port, payload):

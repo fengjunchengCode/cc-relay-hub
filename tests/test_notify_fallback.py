@@ -22,6 +22,23 @@ class CompletedProcessStub(object):
         self.stderr = stderr
 
 
+class SessionActivityStub(object):
+    def __init__(self, status="idle", idle_token="idle-1", marker=False):
+        self.status = status
+        self.idle_token = idle_token
+        self.marker = marker
+
+    def get_session_activity(self):
+        return {
+            "status": self.status,
+            "idle_token": self.idle_token if self.status == "idle" else None,
+            "last_seen_at": 1.0,
+        }
+
+    def has_delivery_marker(self, request_id, expect_reply=False):
+        return self.marker
+
+
 class NotifyFallbackTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -41,8 +58,16 @@ class NotifyFallbackTest(unittest.TestCase):
         )
         self.store.mark_delivered("req-1", 11.0)
         self.store.acquire_session_lock("feishu:target:u1", "req-1", 30)
+        self.session_activity = SessionActivityStub()
+        self.activity_patcher = mock.patch.object(
+            hub,
+            "_origin_session_provider",
+            return_value=self.session_activity,
+        )
+        self.activity_patcher.start()
 
     def tearDown(self):
+        self.activity_patcher.stop()
         self.tmpdir.cleanup()
 
     def test_webhook_injection_preferred_over_config_send(self):
@@ -330,6 +355,7 @@ class NotifyFallbackTest(unittest.TestCase):
         pending = self.store.list_notifications(status="pending")
         self.assertEqual(len(pending), 1)
         self.assertIn("session busy", pending[0]["last_error"])
+        self.session_activity.idle_token = "idle-2"
 
         notice_ids = []
 
@@ -398,6 +424,177 @@ class NotifyFallbackTest(unittest.TestCase):
             self.store.get_notification(second["id"])["attempts"],
             0,
         )
+
+    def test_known_busy_session_is_queued_without_webhook_probe(self):
+        self.session_activity.status = "busy"
+        item = hub.enqueue_reply_notification(
+            self.store,
+            {
+                "request_id": "req-1",
+                "origin_project": "codex-bot",
+                "origin_session_key": "feishu:origin:u1",
+                "target": "claude-bot",
+            },
+            "wait for idle",
+            now=10.0,
+        )
+
+        with mock.patch.object(hub, "_send_via_origin_webhook") as webhook_mock:
+            drained = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=12.0,
+            )
+
+        webhook_mock.assert_not_called()
+        self.assertEqual(drained[0]["status"], "deferred")
+        self.assertEqual(drained[0]["reason"], "session busy")
+        pending = self.store.get_notification(item["id"])
+        self.assertEqual(pending["attempts"], 0)
+        self.assertIsNone(pending["last_attempt_idle_token"])
+
+    def test_same_idle_generation_never_posts_twice(self):
+        item = hub.enqueue_reply_notification(
+            self.store,
+            {
+                "request_id": "req-1",
+                "origin_project": "codex-bot",
+                "origin_session_key": "feishu:origin:u1",
+                "target": "claude-bot",
+            },
+            "one attempt per idle edge",
+            now=10.0,
+        )
+        failed = {
+            "status": "failed",
+            "error": "delivery not acknowledged: session busy",
+        }
+        with mock.patch.object(
+            hub,
+            "_send_via_origin_webhook",
+            return_value=failed,
+        ) as webhook_mock:
+            first = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=12.0,
+            )
+            second = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=13.0,
+            )
+
+        self.assertEqual(webhook_mock.call_count, 1)
+        self.assertEqual(first[0]["status"], "queued")
+        self.assertEqual(second[0]["status"], "deferred")
+        self.assertEqual(second[0]["reason"], "idle generation already attempted")
+        pending = self.store.get_notification(item["id"])
+        self.assertEqual(pending["attempts"], 1)
+        self.assertEqual(pending["last_attempt_idle_token"], "idle-1")
+
+    def test_new_idle_generation_allows_exactly_one_retry(self):
+        item = hub.enqueue_reply_notification(
+            self.store,
+            {
+                "request_id": "req-1",
+                "origin_project": "codex-bot",
+                "origin_session_key": "feishu:origin:u1",
+                "target": "claude-bot",
+            },
+            "retry after final",
+            now=10.0,
+        )
+        outcomes = [
+            {"status": "failed", "error": "session busy"},
+            {"status": "sent", "via": "webhook"},
+        ]
+        with mock.patch.object(
+            hub,
+            "_send_via_origin_webhook",
+            side_effect=outcomes,
+        ) as webhook_mock:
+            hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=12.0,
+            )
+            self.session_activity.idle_token = "idle-2"
+            drained = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=20.0,
+            )
+
+        self.assertEqual(webhook_mock.call_count, 2)
+        self.assertEqual(drained[0]["status"], "delivered")
+        delivered = self.store.get_notification(item["id"])
+        self.assertEqual(delivered["attempts"], 2)
+        self.assertEqual(delivered["last_attempt_idle_token"], "idle-2")
+
+    def test_late_marker_acknowledges_without_duplicate_post(self):
+        item = hub.enqueue_reply_notification(
+            self.store,
+            {
+                "request_id": "req-1",
+                "origin_project": "codex-bot",
+                "origin_session_key": "feishu:origin:u1",
+                "target": "claude-bot",
+            },
+            "late ack",
+            now=10.0,
+        )
+        self.store.mark_notification_failed(
+            item["id"],
+            "ack timeout",
+            attempted_at=12.0,
+            next_attempt_at=13.0,
+            idle_token="idle-1",
+        )
+        self.session_activity.marker = True
+
+        with mock.patch.object(hub, "_send_via_origin_webhook") as webhook_mock:
+            drained = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                force=True,
+                now=20.0,
+            )
+
+        webhook_mock.assert_not_called()
+        self.assertEqual(drained[0]["status"], "delivered")
+        self.assertEqual(drained[0]["via"], "late-ack")
+        delivered = self.store.get_notification(item["id"])
+        self.assertEqual(delivered["attempts"], 1)
 
     def test_inbox_json_exposes_pending_notifications(self):
         hub.enqueue_reply_notification(

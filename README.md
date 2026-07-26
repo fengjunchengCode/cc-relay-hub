@@ -38,7 +38,8 @@ cc-relay-hub adds that private agent-to-agent handoff. Agents can discover peers
 - 🧩 **Bridge CLI agents and IDE agents** — Use cc-connect-backed agents for Claude Code and Codex, and CDP-backed agents for Electron IDEs such as Antigravity.
 - ⏳ **Close replies without blocking** — plain `send` returns immediately while the hook server forwards marked replies back to the origin chat.
 - 📥 **Do not lose replies to busy sessions** — replies wait in a durable
-  outbox and retry after the origin agent finishes its current turn.
+  outbox. The hub checks persisted turn state before POSTing and retries once
+  after the origin agent finishes its current turn.
 
 ## 🛤️ Why I built this
 

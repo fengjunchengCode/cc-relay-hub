@@ -100,6 +100,7 @@ class StateStore(object):
                     """
                 )
                 self._ensure_message_columns(conn)
+                self._ensure_notification_columns(conn)
         finally:
             conn.close()
 
@@ -119,6 +120,22 @@ class StateStore(object):
                 continue
             conn.execute(
                 "ALTER TABLE messages ADD COLUMN %s %s" % (name, column_type)
+            )
+
+    def _ensure_notification_columns(self, conn):
+        columns = set()
+        for row in conn.execute("PRAGMA table_info(notification_outbox)").fetchall():
+            columns.add(row["name"])
+
+        additions = {
+            "last_attempt_idle_token": "TEXT",
+        }
+        for name, column_type in additions.items():
+            if name in columns:
+                continue
+            conn.execute(
+                "ALTER TABLE notification_outbox ADD COLUMN %s %s"
+                % (name, column_type)
             )
 
     def insert_message(
@@ -412,7 +429,13 @@ class StateStore(object):
         finally:
             conn.close()
 
-    def mark_notification_delivered(self, notification_id, delivered_at):
+    def mark_notification_delivered(
+        self,
+        notification_id,
+        delivered_at,
+        idle_token=None,
+        count_attempt=True,
+    ):
         conn = self._connect()
         try:
             with conn:
@@ -420,10 +443,17 @@ class StateStore(object):
                     """
                     UPDATE notification_outbox
                     SET status = 'delivered', delivered_at = ?, last_attempt_at = ?,
-                        attempts = attempts + 1, last_error = NULL
+                        attempts = attempts + ?, last_error = NULL,
+                        last_attempt_idle_token = ?
                     WHERE id = ?
                     """,
-                    (delivered_at, delivered_at, notification_id),
+                    _sanitize_params((
+                        delivered_at,
+                        delivered_at,
+                        1 if count_attempt else 0,
+                        idle_token,
+                        notification_id,
+                    )),
                 )
         finally:
             conn.close()
@@ -434,6 +464,7 @@ class StateStore(object):
         error,
         attempted_at,
         next_attempt_at,
+        idle_token=None,
     ):
         conn = self._connect()
         try:
@@ -442,13 +473,15 @@ class StateStore(object):
                     """
                     UPDATE notification_outbox
                     SET status = 'pending', attempts = attempts + 1,
-                        last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+                        last_attempt_at = ?, next_attempt_at = ?, last_error = ?,
+                        last_attempt_idle_token = ?
                     WHERE id = ?
                     """,
                     _sanitize_params((
                         attempted_at,
                         next_attempt_at,
                         error,
+                        idle_token,
                         notification_id,
                     )),
                 )

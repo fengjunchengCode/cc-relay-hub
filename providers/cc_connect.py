@@ -128,13 +128,10 @@ class CCConnectProvider(MessageProvider, ControlProvider):
 
     def get_health(self):
         webhook_up = _tcp_connectable("127.0.0.1", int(self.binding.get("webhook_port", 0)))
+        activity = self.get_session_activity()
         session_file = self._session_file()
-        last_seen = None
-        agent_status = "unresponsive"
-        if session_file and session_file.exists():
-            last_seen = _latest_history_timestamp(session_file)
-            if last_seen is not None:
-                agent_status = "busy" if (time.time() - last_seen) <= 60 else "idle"
+        last_seen = activity.get("last_seen_at")
+        agent_status = activity.get("status") or "unresponsive"
 
         hook_configured = self._has_required_hook()
         details = "hook=%s, session_file=%s" % (
@@ -148,6 +145,74 @@ class CCConnectProvider(MessageProvider, ControlProvider):
             last_delivery_at=None,
             details=details,
         )
+
+    def get_session_activity(self):
+        """Return an authoritative busy/idle edge from persisted turn history.
+
+        cc-connect appends the inbound user item before an agent starts work and
+        appends the assistant item only after that turn finishes. The role of
+        the newest history item is therefore a better delivery preflight than
+        the old "activity within 60 seconds" heuristic:
+
+        - newest role=user      -> the session is busy;
+        - newest role=assistant -> the session is idle.
+
+        The token identifies one stable idle generation. Outbox delivery stores
+        it so the same notification cannot be POSTed repeatedly while the
+        session remains in that generation.
+        """
+        session_file = self._session_file()
+        if not session_file or not session_file.exists():
+            return {"status": "unknown", "idle_token": None, "last_seen_at": None}
+        try:
+            with session_file.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return {"status": "unknown", "idle_token": None, "last_seen_at": None}
+
+        newest = None
+        newest_session_id = None
+        newest_timestamp = 0.0
+        for session_id, session in (data.get("sessions") or {}).items():
+            if not session:
+                continue
+            for item in (session.get("history") or []):
+                timestamp = _parse_timestamp(item.get("timestamp", ""))
+                if newest is None or timestamp >= newest_timestamp:
+                    newest = item
+                    newest_session_id = session_id
+                    newest_timestamp = timestamp
+
+        if newest is None:
+            return {"status": "unknown", "idle_token": None, "last_seen_at": None}
+
+        role = newest.get("role")
+        if role == "user":
+            status = "busy"
+            idle_token = None
+        elif role == "assistant":
+            status = "idle"
+            idle_token = "%s:%s:%s" % (
+                session_file.name,
+                newest_session_id or "",
+                newest.get("timestamp") or newest_timestamp,
+            )
+        else:
+            status = "unknown"
+            idle_token = None
+        return {
+            "status": status,
+            "idle_token": idle_token,
+            "last_seen_at": newest_timestamp or None,
+        }
+
+    def has_delivery_marker(self, request_id, expect_reply=False):
+        marker = (
+            "[cc-relay request_id=%s]" % request_id
+            if expect_reply
+            else "[cc-relay notice_id=%s]" % request_id
+        )
+        return self._delivery_marker_recorded(marker)
 
     def supports_control(self):
         return True

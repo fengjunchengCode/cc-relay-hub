@@ -161,23 +161,73 @@ class StateStoreTest(unittest.TestCase):
             "session busy",
             attempted_at=101.0,
             next_attempt_at=103.0,
+            idle_token="idle-1",
         )
 
         pending = self.store.get_notification(item["id"])
         self.assertEqual(pending["status"], "pending")
         self.assertEqual(pending["attempts"], 1)
         self.assertEqual(pending["last_error"], "session busy")
+        self.assertEqual(pending["last_attempt_idle_token"], "idle-1")
         self.assertEqual(
             self.store.list_notifications(status="pending", due_at=102.0),
             [],
         )
 
-        self.store.mark_notification_delivered(item["id"], 104.0)
+        self.store.mark_notification_delivered(
+            item["id"],
+            104.0,
+            idle_token="idle-2",
+        )
         delivered = self.store.get_notification(item["id"])
         self.assertEqual(delivered["status"], "delivered")
         self.assertEqual(delivered["attempts"], 2)
         self.assertEqual(delivered["delivered_at"], 104.0)
+        self.assertEqual(delivered["last_attempt_idle_token"], "idle-2")
         self.assertIsNone(delivered["last_error"])
+
+    def test_notification_outbox_migrates_idle_token_column(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = str(Path(td) / "legacy.db")
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE notification_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dedupe_key TEXT NOT NULL UNIQUE,
+                        request_id TEXT,
+                        origin_project TEXT NOT NULL,
+                        origin_session_key TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        next_attempt_at REAL NOT NULL,
+                        last_attempt_at REAL,
+                        delivered_at REAL,
+                        last_error TEXT
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            StateStore(db_path)
+            conn = sqlite3.connect(db_path)
+            try:
+                columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(notification_outbox)"
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+
+            self.assertIn("last_attempt_idle_token", columns)
 
     def test_notification_claim_prevents_parallel_drains(self):
         item = self.store.enqueue_notification(

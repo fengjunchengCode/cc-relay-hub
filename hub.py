@@ -694,6 +694,12 @@ def _notification_retry_delay(attempts):
     return min(60.0, float(2 ** min(max(int(attempts), 0), 5)))
 
 
+def _origin_session_provider(origin_project, origin_session, binding):
+    webhook_binding = dict(binding)
+    webhook_binding["session_key"] = origin_session
+    return CCConnectProvider(origin_project, webhook_binding)
+
+
 def drain_notification_outbox(
     state_path=None,
     bindings=None,
@@ -714,6 +720,7 @@ def drain_notification_outbox(
     )
     results = []
     blocked_sessions = set()
+    session_activity = {}
     for item in rows:
         session_id = (item["origin_project"], item["origin_session_key"])
         if session_id in blocked_sessions:
@@ -721,17 +728,101 @@ def drain_notification_outbox(
             continue
         binding = bindings.get("cc_connect", {}).get(item["origin_project"])
         if not binding:
-            delivery = {"status": "failed", "error": "origin binding missing"}
-        else:
-            delivery = _send_via_origin_webhook(
-                item["origin_project"],
-                item["origin_session_key"],
-                binding,
-                item["content"],
-                notice_id="outbox-%s" % item["dedupe_key"][:24],
+            store.release_notification_claim(item["id"])
+            results.append({
+                "status": "deferred",
+                "id": item["id"],
+                "request_id": item.get("request_id"),
+                "origin_project": item["origin_project"],
+                "origin_session_key": item["origin_session_key"],
+                "reason": "origin binding missing",
+            })
+            blocked_sessions.add(session_id)
+            continue
+
+        notice_id = "outbox-%s" % item["dedupe_key"][:24]
+        provider = _origin_session_provider(
+            item["origin_project"],
+            item["origin_session_key"],
+            binding,
+        )
+
+        # A previous POST may have been accepted just after its short ACK
+        # window elapsed. Observe that late marker before considering another
+        # delivery attempt; this turns a delayed ACK into a state transition,
+        # never a duplicate POST.
+        if provider.has_delivery_marker(notice_id, expect_reply=False):
+            store.mark_notification_delivered(
+                item["id"],
+                now,
+                idle_token=item.get("last_attempt_idle_token"),
+                count_attempt=False,
             )
+            if item.get("request_id"):
+                store.mark_notified(item["request_id"], now)
+            results.append({
+                "status": "delivered",
+                "id": item["id"],
+                "request_id": item.get("request_id"),
+                "origin_project": item["origin_project"],
+                "origin_session_key": item["origin_session_key"],
+                "via": "late-ack",
+            })
+            blocked_sessions.add(session_id)
+            continue
+
+        activity = session_activity.get(session_id)
+        if activity is None:
+            activity = provider.get_session_activity()
+            session_activity[session_id] = activity
+        activity_status = activity.get("status") or "unknown"
+        idle_token = activity.get("idle_token")
+
+        # Never probe a known-busy or unreadable session. The durable outbox is
+        # the queue; an explicit message.sent idle edge (or the low-frequency
+        # watchdog observing a new idle token) will call this drain again.
+        if activity_status != "idle" or not idle_token:
+            store.release_notification_claim(item["id"])
+            results.append({
+                "status": "deferred",
+                "id": item["id"],
+                "request_id": item.get("request_id"),
+                "origin_project": item["origin_project"],
+                "origin_session_key": item["origin_session_key"],
+                "reason": "session %s" % activity_status,
+            })
+            blocked_sessions.add(session_id)
+            continue
+
+        # One notification attempt per persisted idle generation. Reconcile,
+        # startup, and duplicate hooks may all request a drain, but none may
+        # POST the same item again until the session completes another turn.
+        if item.get("last_attempt_idle_token") == idle_token:
+            store.release_notification_claim(item["id"])
+            results.append({
+                "status": "deferred",
+                "id": item["id"],
+                "request_id": item.get("request_id"),
+                "origin_project": item["origin_project"],
+                "origin_session_key": item["origin_session_key"],
+                "reason": "idle generation already attempted",
+            })
+            blocked_sessions.add(session_id)
+            continue
+
+        delivery = _send_via_origin_webhook(
+            item["origin_project"],
+            item["origin_session_key"],
+            binding,
+            item["content"],
+            notice_id=notice_id,
+        )
         if delivery["status"] == "sent":
-            store.mark_notification_delivered(item["id"], now)
+            store.mark_notification_delivered(
+                item["id"],
+                now,
+                idle_token=idle_token,
+            )
             if item.get("request_id"):
                 store.mark_notified(item["request_id"], now)
             results.append({
@@ -741,11 +832,18 @@ def drain_notification_outbox(
                 "origin_project": item["origin_project"],
                 "origin_session_key": item["origin_session_key"],
             })
+            blocked_sessions.add(session_id)
             continue
 
         error = delivery.get("error") or delivery.get("reason") or "delivery failed"
         next_attempt = now + _notification_retry_delay(item.get("attempts", 0))
-        store.mark_notification_failed(item["id"], error, now, next_attempt)
+        store.mark_notification_failed(
+            item["id"],
+            error,
+            now,
+            next_attempt,
+            idle_token=idle_token,
+        )
         if item.get("request_id"):
             store.mark_notify_failed(item["request_id"], error)
         results.append({
@@ -758,7 +856,8 @@ def drain_notification_outbox(
             "next_attempt_at": next_attempt,
         })
         # Preserve FIFO order within one origin conversation. A busy session
-        # that rejected the first notice will reject every later notice too.
+        # or one accepted notice means every later notice must wait for the
+        # next idle generation.
         blocked_sessions.add(session_id)
     return results
 
