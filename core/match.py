@@ -34,6 +34,8 @@ def extract_relay_reply(content, request_id):
     parsed = parse_relay_reply(content)
     if not parsed or parsed["request_id"] != request_id:
         return None
+    if not parsed["content"].strip():
+        return None
     return parsed["content"]
 
 

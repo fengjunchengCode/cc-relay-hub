@@ -60,6 +60,19 @@ class BuildRelayPromptTest(unittest.TestCase):
         self.assertIn("give the user a concise progress/result update", prompt)
 
 
+class RelayEnvelopeValidationTest(unittest.TestCase):
+    def test_rejects_empty_body(self):
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            RelayEnvelope(
+                request_id="empty-1",
+                sender="test-sender",
+                target="test-target",
+                body=" \n\t",
+                created_at=1000.0,
+                reply_to=None,
+            )
+
+
 class ExtractReplyFromTranscriptTest(unittest.TestCase):
     def test_marker_at_start(self):
         text = "[cc-relay reply_to=req-123]\nHere is the fix."

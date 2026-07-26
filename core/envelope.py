@@ -13,6 +13,10 @@ class RelayEnvelope:
     ttl: int = 300
     expect_reply: bool = True
 
+    def __post_init__(self):
+        if not isinstance(self.body, str) or not self.body.strip():
+            raise ValueError("relay message body must not be empty or whitespace-only")
+
 
 @dataclass
 class DeliveryReceipt:

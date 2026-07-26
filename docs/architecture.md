@@ -75,6 +75,8 @@ The relay core uses this marker to associate a reply with the original request. 
 
 No-reply notices use `[cc-relay notice_id=<id>]` instead of request/reply markers. They do not trigger reply-to-reply loops, but they still open an assistant turn in the origin conversation. The runtime prompt therefore forbids an empty/`NO_REPLY` final and requires a concise user-facing progress/result update. Pending notices for the same origin session are coalesced in FIFO order into one webhook delivery so a backlog cannot create a chain of synthetic blank turns.
 
+Empty transport is invalid at every boundary. The CLI rejects empty or whitespace-only request/notice bodies, envelopes cannot be constructed with an empty body, webhook/config delivery refuses empty notices, and marker-only replies are rejected before they can be stored in the notification outbox.
+
 ## Busy-session delivery and acknowledgement
 
 Some cc-connect releases return HTTP 200 with `status=accepted` before checking

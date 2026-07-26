@@ -171,13 +171,17 @@ def _resolve_message_input(args):
     if sum([has_inline, has_stdin, has_file]) != 1:
         raise ValueError("provide exactly one message source: MESSAGE, --stdin, or --message-file")
     if has_stdin:
-        return sys.stdin.read()
-    if has_file:
+        message = sys.stdin.read()
+    elif has_file:
         try:
-            return Path(message_file).read_text(encoding="utf-8-sig")
+            message = Path(message_file).read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise ValueError("cannot read --message-file %s: %s" % (message_file, exc)) from exc
-    return args.message
+    else:
+        message = args.message
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError("message body must not be empty or whitespace-only")
+    return message
 
 
 def load_json(path):
@@ -559,6 +563,8 @@ def _is_retryable_error(stderr_text):
 
 
 def _send_via_origin_config(origin_project, origin_session, binding, content, runner):
+    if not isinstance(content, str) or not content.strip():
+        return {"status": "failed", "error": "refusing to deliver an empty relay notice"}
     config_path = binding.get("config_path")
     if not config_path:
         return {"status": "skipped", "reason": "config_missing"}
@@ -593,6 +599,8 @@ def _send_via_origin_webhook(
     content,
     notice_id=None,
 ):
+    if not isinstance(content, str) or not content.strip():
+        return {"status": "failed", "error": "refusing to deliver an empty relay notice"}
     webhook_port = int(binding.get("webhook_port", 0) or 0)
     if not webhook_port:
         return {"status": "skipped", "reason": "webhook_missing"}
@@ -676,6 +684,8 @@ def enqueue_reply_notification(store, message, reply_text, label=None, now=None)
     origin_project = message.get("origin_project")
     origin_session = message.get("origin_session_key")
     if not origin_project or not origin_session:
+        return None
+    if not isinstance(reply_text, str) or not reply_text.strip():
         return None
     created_at = time.time() if now is None else now
     dedupe_key = _notification_dedupe_key(message, reply_text, label=label)
@@ -915,6 +925,8 @@ def queue_and_attempt_reply_notification(
     label=None,
     now=None,
 ):
+    if not isinstance(reply_text, str) or not reply_text.strip():
+        return {"status": "skipped", "reason": "empty_reply"}
     item = enqueue_reply_notification(
         store,
         message,
@@ -975,6 +987,21 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
             timestamp=timestamp,
         )
         return {"status": "unmatched", "reason": "missing_relay_marker", "session_key": session_key}
+    if not relay_reply["content"].strip():
+        store.append_event(
+            event_type="message.invalid",
+            agent_id=agent_id,
+            request_id=relay_reply["request_id"],
+            session_key=session_key,
+            content="",
+            timestamp=timestamp,
+        )
+        return {
+            "status": "rejected",
+            "reason": "empty_relay_reply",
+            "request_id": relay_reply["request_id"],
+            "session_key": session_key,
+        }
 
     message = store.get_message(relay_reply["request_id"])
     if (

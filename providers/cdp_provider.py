@@ -97,7 +97,7 @@ class CDPProvider(MessageProvider, ControlProvider):
 
         # Search for reply marker anywhere in the transcript
         reply = extract_reply_from_transcript(text, self._pending_request_id)
-        if reply is not None:
+        if reply is not None and reply.strip():
             # Emit event with content starting at the marker so
             # core/match.py:extract_relay_reply() can match it.
             request_id = self._pending_request_id

@@ -98,6 +98,11 @@ class MatchFrameworkTest(unittest.TestCase):
         self.assertIsNone(extract_relay_reply("answer", "req-1"))
         self.assertIsNone(extract_relay_reply("[cc-relay reply_to=req-2]\nanswer", "req-1"))
 
+    def test_extract_relay_reply_rejects_marker_only_response(self):
+        self.assertIsNone(
+            extract_relay_reply("[cc-relay reply_to=req-1]\n \t", "req-1")
+        )
+
     def test_wait_framework_times_out_and_releases_lock(self):
         provider = StaticProvider([])
 

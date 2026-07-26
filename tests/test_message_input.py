@@ -52,6 +52,19 @@ class MessageInputTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             hub._resolve_message_input(args)
 
+    def test_rejects_empty_inline_message(self):
+        args = hub.parse_args(["send", "claude-bot", ""])
+
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            hub._resolve_message_input(args)
+
+    def test_rejects_whitespace_only_stdin_message(self):
+        args = hub.parse_args(["send", "claude-bot", "--stdin"])
+
+        with mock.patch("sys.stdin", io.StringIO(" \n\t")):
+            with self.assertRaisesRegex(ValueError, "must not be empty"):
+                hub._resolve_message_input(args)
+
     def test_no_reply_rejects_wait_combination_before_registry_access(self):
         args = hub.parse_args(["send", "claude-bot", "hello", "--no-reply", "--wait"])
 

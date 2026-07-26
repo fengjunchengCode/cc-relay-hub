@@ -131,6 +131,23 @@ class CDPProviderPollEventsTest(unittest.TestCase):
         self.assertEqual(events, [])
 
     @patch("providers.cdp_provider.CDPProvider._ensure_backend")
+    def test_marker_only_reply_is_not_emitted_or_cleared(self, mock_ensure):
+        mock_backend = MagicMock()
+        mock_backend.poll_once.return_value = (
+            [],
+            "[cc-relay reply_to=req-123]\n \t",
+        )
+        mock_backend.state = MagicMock()
+        mock_backend.state.consecutive_idle = 0
+        mock_ensure.return_value = mock_backend
+
+        provider = CDPProvider("test-agent", _make_binding())
+        provider._pending_request_id = "req-123"
+
+        self.assertEqual(provider.poll_events(), [])
+        self.assertEqual(provider._pending_request_id, "req-123")
+
+    @patch("providers.cdp_provider.CDPProvider._ensure_backend")
     def test_clicks_hitl_after_idle_threshold(self, mock_ensure):
         mock_backend = MagicMock()
         mock_backend.poll_once.return_value = ([], "Same text as before")

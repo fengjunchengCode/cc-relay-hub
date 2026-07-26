@@ -122,6 +122,41 @@ class HookHandlerTest(unittest.TestCase):
         self.assertEqual(message["status"], "delivered")
         self.assertTrue(self.store.has_active_lock("feishu:target:u1"))
 
+    def test_handle_hook_event_rejects_empty_relay_reply_without_forwarding(self):
+        self.store.insert_message(
+            request_id="req-empty",
+            sender="hub",
+            target="claude-bot",
+            session_key="feishu:target:u1",
+            provider="cc_connect",
+            body="ping",
+            status="pending",
+            created_at=10.0,
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+        )
+        self.store.mark_delivered("req-empty", 11.0)
+        self.store.acquire_session_lock("feishu:target:u1", "req-empty", 30)
+
+        result = hub.handle_hook_event(
+            {
+                "event": "message.sent",
+                "project": "claude-bot",
+                "session_key": "feishu:target:u1",
+                "content": "[cc-relay reply_to=req-empty]\n \t",
+                "timestamp": "2026-05-06T10:00:00+08:00",
+            },
+            state_path=self.db_path,
+            bindings={"cc_connect": {}},
+        )
+
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "empty_relay_reply")
+        message = self.store.get_message("req-empty")
+        self.assertEqual(message["status"], "delivered")
+        self.assertTrue(self.store.has_active_lock("feishu:target:u1"))
+        self.assertEqual(self.store.list_notifications(status="open"), [])
+
     def test_handle_hook_event_forwards_followup_reply_on_same_request_id(self):
         self.store.insert_message(
             request_id="req-1",

@@ -70,6 +70,39 @@ class NotifyFallbackTest(unittest.TestCase):
         self.activity_patcher.stop()
         self.tmpdir.cleanup()
 
+    def test_empty_reply_is_never_queued_or_delivered(self):
+        result = hub.queue_and_attempt_reply_notification(
+            self.store,
+            {
+                "request_id": "req-1",
+                "origin_project": "codex-bot",
+                "origin_session_key": "feishu:origin:u1",
+                "target": "claude-bot",
+            },
+            " \n\t",
+            bindings={
+                "cc_connect": {
+                    "codex-bot": {"webhook_port": 9999},
+                }
+            },
+        )
+
+        self.assertEqual(result, {"status": "skipped", "reason": "empty_reply"})
+        self.assertEqual(self.store.list_notifications(status="open"), [])
+
+    def test_origin_webhook_refuses_empty_notice_before_network_access(self):
+        with mock.patch.object(hub, "CCConnectProvider") as provider_mock:
+            result = hub._send_via_origin_webhook(
+                "codex-bot",
+                "feishu:origin:u1",
+                {"webhook_port": 9999},
+                " \t",
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("empty relay notice", result["error"])
+        provider_mock.assert_not_called()
+
     def test_webhook_injection_preferred_over_config_send(self):
         """Webhook must be tried first: it injects the reply into the origin
         agent conversation, while `cc-connect send` only posts to the
