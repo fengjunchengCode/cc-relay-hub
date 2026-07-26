@@ -82,6 +82,7 @@ class CCConnectProviderTest(unittest.TestCase):
                         "webhook_port": port,
                         "webhook_path": "/hook",
                         "session_key": "feishu:s1:u1",
+                        "delivery_ack_timeout": 0,
                     },
                 )
                 envelope = RelayEnvelope(
@@ -124,6 +125,7 @@ class CCConnectProviderTest(unittest.TestCase):
                         "webhook_port": port,
                         "webhook_path": "/hook",
                         "session_key": "feishu:s1:u1",
+                        "delivery_ack_timeout": 0,
                     },
                 )
                 envelope = RelayEnvelope(
@@ -145,6 +147,117 @@ class CCConnectProviderTest(unittest.TestCase):
                 self.assertIn("[cc-relay notice_id=notice-1]", payload["prompt"])
                 self.assertNotIn("[cc-relay request_id=notice-1]", payload["prompt"])
                 self.assertNotIn("[cc-relay reply_to=notice-1]", payload["prompt"])
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+
+    def test_http_accepted_without_session_marker_is_not_delivery(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            sessions = Path(data_dir) / "sessions"
+            sessions.mkdir()
+            (sessions / "codex-bot_active.json").write_text(
+                json.dumps({"sessions": {"s1": {"history": []}}}),
+                encoding="utf-8",
+            )
+            CaptureHandler.payloads = []
+            server = socketserver.TCPServer(("127.0.0.1", 0), CaptureHandler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.daemon = True
+            thread.start()
+            try:
+                provider = CCConnectProvider(
+                    agent_id="codex-bot",
+                    binding={
+                        "webhook_port": server.server_address[1],
+                        "webhook_path": "/hook",
+                        "session_key": "feishu:s1:u1",
+                        "data_dir": data_dir,
+                        "delivery_ack_timeout": 0.1,
+                    },
+                )
+                envelope = RelayEnvelope(
+                    request_id="busy-drop",
+                    sender="hub",
+                    target="codex-bot",
+                    body="reply",
+                    created_at=1.0,
+                    reply_to=None,
+                    ttl=30,
+                    expect_reply=False,
+                )
+
+                receipt = provider.deliver(envelope)
+
+                self.assertEqual(receipt.status, "failed")
+                self.assertIn("not acknowledged", receipt.error)
+                self.assertEqual(len(CaptureHandler.payloads), 1)
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+
+    def test_session_marker_confirms_delivery_and_prevents_duplicate_post(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            sessions = Path(data_dir) / "sessions"
+            sessions.mkdir()
+            session_path = sessions / "codex-bot_active.json"
+            session_path.write_text(
+                json.dumps({"sessions": {"s1": {"history": []}}}),
+                encoding="utf-8",
+            )
+
+            class AcceptingHandler(CaptureHandler):
+                payloads = []
+
+                def do_POST(self):  # noqa: N802
+                    length = int(self.headers["Content-Length"])
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    AcceptingHandler.payloads.append(payload)
+                    data = json.loads(session_path.read_text(encoding="utf-8"))
+                    data["sessions"]["s1"]["history"].append({
+                        "role": "user",
+                        "content": payload["prompt"],
+                        "timestamp": "2026-07-25T10:00:00-04:00",
+                    })
+                    session_path.write_text(json.dumps(data), encoding="utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"event":"cc-relay","status":"accepted"}')
+
+            server = socketserver.TCPServer(("127.0.0.1", 0), AcceptingHandler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.daemon = True
+            thread.start()
+            try:
+                provider = CCConnectProvider(
+                    agent_id="codex-bot",
+                    binding={
+                        "webhook_port": server.server_address[1],
+                        "webhook_path": "/hook",
+                        "session_key": "feishu:s1:u1",
+                        "data_dir": data_dir,
+                        "delivery_ack_timeout": 0.2,
+                    },
+                )
+                envelope = RelayEnvelope(
+                    request_id="confirmed",
+                    sender="hub",
+                    target="codex-bot",
+                    body="reply",
+                    created_at=1.0,
+                    reply_to=None,
+                    ttl=30,
+                    expect_reply=False,
+                )
+
+                first = provider.deliver(envelope)
+                second = provider.deliver(envelope)
+
+                self.assertEqual(first.status, "delivered")
+                self.assertEqual(second.status, "delivered")
+                self.assertEqual(len(AcceptingHandler.payloads), 1)
             finally:
                 server.shutdown()
                 thread.join()

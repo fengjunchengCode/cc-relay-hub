@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -18,7 +19,7 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 from core.envelope import RelayEnvelope
-from core.match import parse_relay_reply, wait_for_reply_framework
+from core.match import extract_relay_reply, parse_relay_reply, wait_for_reply_framework
 from core.state import StateStore
 from providers.cc_connect import CCConnectProvider, _platform_from_session_key
 
@@ -79,6 +80,33 @@ def parse_args(argv):
     )
     ctx_parser.add_argument("--project", default=None, help=argparse.SUPPRESS)
     subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="Recover replies the hook missed by sweeping open requests against session history",
+    )
+    reconcile_parser.add_argument("--min-age", type=float, default=30.0,
+                                  help="Only sweep requests delivered at least this many seconds ago (default 30)")
+    reconcile_parser.add_argument("--max-age", type=float, default=48 * 3600.0,
+                                  help="Ignore requests older than this many seconds (default 48h)")
+    reconcile_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    inbox_parser = subparsers.add_parser(
+        "inbox",
+        help="Show queued reply notifications that have not reached their origin session",
+    )
+    inbox_parser.add_argument("--origin-project", default=None)
+    inbox_parser.add_argument("--origin-session", default=None)
+    inbox_parser.add_argument("--all", action="store_true", help="Include delivered notifications")
+    inbox_parser.add_argument("--limit", type=int, default=100)
+    inbox_parser.add_argument("--format", choices=["text", "json"], default="text")
+
+    drain_parser = subparsers.add_parser("_drain_notifications", help=argparse.SUPPRESS)
+    drain_parser.add_argument("--origin-project", default=None)
+    drain_parser.add_argument("--origin-session", default=None)
+    drain_parser.add_argument("--force", action="store_true")
+    drain_parser.add_argument("--limit", type=int, default=100)
+    drain_parser.add_argument("--format", choices=["text", "json"], default="text")
 
     # Groups management
     groups_parser = subparsers.add_parser("groups", help="Manage agent groups")
@@ -482,8 +510,9 @@ def _parse_event_timestamp(value):
         return time.time()
 
 
-def _build_notification_content(message, reply_text):
-    return "[cc-relay:%s]\n%s" % (message["target"], reply_text)
+def _build_notification_content(message, reply_text, label=None):
+    tag = message["target"] if not label else "%s %s" % (message["target"], label)
+    return "[cc-relay:%s]\n%s" % (tag, reply_text)
 
 
 def _run_cc_connect_send(command, input_text):
@@ -557,7 +586,13 @@ def _send_via_origin_config(origin_project, origin_session, binding, content, ru
     return {"status": "sent", "via": "config"}
 
 
-def _send_via_origin_webhook(origin_project, origin_session, binding, content):
+def _send_via_origin_webhook(
+    origin_project,
+    origin_session,
+    binding,
+    content,
+    notice_id=None,
+):
     webhook_port = int(binding.get("webhook_port", 0) or 0)
     if not webhook_port:
         return {"status": "skipped", "reason": "webhook_missing"}
@@ -573,7 +608,7 @@ def _send_via_origin_webhook(origin_project, origin_session, binding, content):
     # never hears back, and the relay thread dies silently.
     receipt = provider.deliver(
         RelayEnvelope(
-            request_id=uuid.uuid4().hex,
+            request_id=notice_id or uuid.uuid4().hex,
             sender="cc-relay",
             target=origin_project,
             body=content,
@@ -588,7 +623,7 @@ def _send_via_origin_webhook(origin_project, origin_session, binding, content):
     return {"status": "sent", "via": "webhook"}
 
 
-def notify_origin_reply(message, reply_text, bindings=None, runner=None):
+def notify_origin_reply(message, reply_text, bindings=None, runner=None, label=None):
     origin_project = message.get("origin_project")
     origin_session = message.get("origin_session_key")
     if not origin_project or not origin_session:
@@ -599,7 +634,7 @@ def notify_origin_reply(message, reply_text, bindings=None, runner=None):
     if not binding:
         return {"status": "failed", "error": "origin binding missing"}
 
-    content = _build_notification_content(message, reply_text)
+    content = _build_notification_content(message, reply_text, label=label)
     runner = runner or _run_cc_connect_send
     # Webhook first: it injects the reply into the origin agent conversation
     # (prompt via cc-connect /hook). `cc-connect send` only posts an outbound
@@ -608,6 +643,14 @@ def notify_origin_reply(message, reply_text, bindings=None, runner=None):
     webhook = _send_via_origin_webhook(origin_project, origin_session, binding, content)
     if webhook["status"] == "sent":
         return webhook
+    # A configured webhook is the only path that injects into the origin
+    # agent session. In particular, cc-connect v1.3 can return HTTP 200 and
+    # then drop the prompt because that session is busy. The provider detects
+    # this by checking for the unique notice marker in session history. Do not
+    # turn that failed agent delivery into a false success by posting the reply
+    # to the user-facing chat through `cc-connect send`.
+    if webhook["status"] == "failed":
+        return webhook
     notify = _send_via_origin_config(origin_project, origin_session, binding, content, runner)
     if notify["status"] in ("sent", "failed"):
         return notify
@@ -615,6 +658,148 @@ def notify_origin_reply(message, reply_text, bindings=None, runner=None):
     if webhook["status"] == "failed":
         return webhook
     return {"status": "failed", "error": "webhook fallback unavailable: %s" % notify.get("reason", "unknown")}
+
+
+def _notification_dedupe_key(message, reply_text, label=None):
+    payload = "\0".join([
+        message.get("request_id") or "",
+        message.get("origin_project") or "",
+        message.get("origin_session_key") or "",
+        message.get("target") or "",
+        label or "",
+        reply_text or "",
+    ])
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def enqueue_reply_notification(store, message, reply_text, label=None, now=None):
+    origin_project = message.get("origin_project")
+    origin_session = message.get("origin_session_key")
+    if not origin_project or not origin_session:
+        return None
+    created_at = time.time() if now is None else now
+    dedupe_key = _notification_dedupe_key(message, reply_text, label=label)
+    return store.enqueue_notification(
+        dedupe_key=dedupe_key,
+        request_id=message.get("request_id"),
+        origin_project=origin_project,
+        origin_session_key=origin_session,
+        target=message.get("target") or "unknown",
+        content=_build_notification_content(message, reply_text, label=label),
+        created_at=created_at,
+    )
+
+
+def _notification_retry_delay(attempts):
+    return min(60.0, float(2 ** min(max(int(attempts), 0), 5)))
+
+
+def drain_notification_outbox(
+    state_path=None,
+    bindings=None,
+    origin_project=None,
+    origin_session=None,
+    force=False,
+    limit=100,
+    now=None,
+):
+    store = StateStore(str(state_path or STATE_DB_PATH))
+    bindings = load_bindings(bindings)
+    now = time.time() if now is None else now
+    rows = store.claim_notifications(
+        origin_project=origin_project,
+        origin_session_key=origin_session,
+        due_at=None if force else now,
+        limit=limit,
+    )
+    results = []
+    blocked_sessions = set()
+    for item in rows:
+        session_id = (item["origin_project"], item["origin_session_key"])
+        if session_id in blocked_sessions:
+            store.release_notification_claim(item["id"])
+            continue
+        binding = bindings.get("cc_connect", {}).get(item["origin_project"])
+        if not binding:
+            delivery = {"status": "failed", "error": "origin binding missing"}
+        else:
+            delivery = _send_via_origin_webhook(
+                item["origin_project"],
+                item["origin_session_key"],
+                binding,
+                item["content"],
+                notice_id="outbox-%s" % item["dedupe_key"][:24],
+            )
+        if delivery["status"] == "sent":
+            store.mark_notification_delivered(item["id"], now)
+            if item.get("request_id"):
+                store.mark_notified(item["request_id"], now)
+            results.append({
+                "status": "delivered",
+                "id": item["id"],
+                "request_id": item.get("request_id"),
+                "origin_project": item["origin_project"],
+                "origin_session_key": item["origin_session_key"],
+            })
+            continue
+
+        error = delivery.get("error") or delivery.get("reason") or "delivery failed"
+        next_attempt = now + _notification_retry_delay(item.get("attempts", 0))
+        store.mark_notification_failed(item["id"], error, now, next_attempt)
+        if item.get("request_id"):
+            store.mark_notify_failed(item["request_id"], error)
+        results.append({
+            "status": "queued",
+            "id": item["id"],
+            "request_id": item.get("request_id"),
+            "origin_project": item["origin_project"],
+            "origin_session_key": item["origin_session_key"],
+            "error": error,
+            "next_attempt_at": next_attempt,
+        })
+        # Preserve FIFO order within one origin conversation. A busy session
+        # that rejected the first notice will reject every later notice too.
+        blocked_sessions.add(session_id)
+    return results
+
+
+def queue_and_attempt_reply_notification(
+    store,
+    message,
+    reply_text,
+    bindings=None,
+    label=None,
+    now=None,
+):
+    item = enqueue_reply_notification(
+        store,
+        message,
+        reply_text,
+        label=label,
+        now=now,
+    )
+    if not item:
+        return {"status": "skipped", "reason": "origin_missing"}
+    if item["status"] == "delivered":
+        return {"status": "sent", "via": "outbox", "outbox_id": item["id"]}
+    drain_notification_outbox(
+        state_path=store.db_path,
+        bindings=bindings,
+        origin_project=item["origin_project"],
+        origin_session=item["origin_session_key"],
+        force=True,
+        limit=100,
+        now=now,
+    )
+    current = store.get_notification(item["id"])
+    if current and current["status"] == "delivered":
+        return {"status": "sent", "via": "outbox", "outbox_id": item["id"]}
+    return {
+        "status": "queued",
+        "via": "outbox",
+        "outbox_id": item["id"],
+        "error": (current or item).get("last_error") or "waiting for origin session to become idle",
+    }
 
 
 def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
@@ -652,7 +837,6 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
         not message
         or message.get("session_key") != session_key
         or message.get("target") != agent_id
-        or message.get("status") not in ("pending", "delivered")
     ):
         store.append_event(
             event_type=event_type,
@@ -663,6 +847,37 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
             timestamp=timestamp,
         )
         return {"status": "unmatched", "request_id": relay_reply["request_id"], "session_key": session_key}
+
+    if message.get("status") not in ("pending", "delivered"):
+        # A request_id used to be single-shot: any second reply (progress
+        # update, final report after an early ack, late reply after --wait
+        # timed out) was dropped as "unmatched" while the sender believed it
+        # went through. Forward it to the origin as a follow-up instead.
+        if relay_reply["content"] == (message.get("reply_body") or ""):
+            # Same body twice happens when the reconciler swept the session
+            # file just before the hook fired for the same turn.
+            return {"status": "duplicate", "request_id": message["request_id"]}
+        store.append_event(
+            event_type="message.followup",
+            agent_id=agent_id,
+            request_id=message["request_id"],
+            session_key=session_key,
+            content=relay_reply["content"],
+            timestamp=timestamp,
+        )
+        store.mark_replied(message["request_id"], relay_reply["content"], timestamp)
+        notify = queue_and_attempt_reply_notification(
+            store,
+            message,
+            relay_reply["content"],
+            bindings=bindings,
+            label="follow-up",
+        )
+        return {
+            "status": "followup",
+            "request_id": message["request_id"],
+            "notify": notify,
+        }
 
     store.append_event(
         event_type=event_type,
@@ -676,17 +891,182 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
     store.mark_replied(message["request_id"], relay_reply["content"], timestamp)
     store.release_session_lock(session_key, message["request_id"])
 
-    notify = notify_origin_reply(message, relay_reply["content"], bindings=bindings, runner=runner)
-    if notify["status"] == "sent":
-        store.mark_notified(message["request_id"], time.time())
-    elif notify["status"] == "failed":
-        store.mark_notify_failed(message["request_id"], notify["error"])
+    notify = queue_and_attempt_reply_notification(
+        store,
+        message,
+        relay_reply["content"],
+        bindings=bindings,
+    )
 
     return {
         "status": "matched",
         "request_id": message["request_id"],
         "notify": notify,
     }
+
+
+def reconcile_messages(
+    state_path=None,
+    bindings=None,
+    runner=None,
+    min_age_secs=30,
+    max_age_secs=48 * 3600,
+    now=None,
+    provider_factory=None,
+):
+    """Sweep open requests against the target's session history and recover
+    replies the hook path never saw.
+
+    cc-connect only fires the message.sent hook for solicited turns; a long
+    task's final report goes out as an unsolicited turn and is lost even
+    though it carries a valid reply marker and is recorded in the agent's
+    sessions/*.json. The hook stays the fast path; this sweep is the
+    correctness path, reading that same session history via poll_events().
+    """
+    store = StateStore(str(state_path or STATE_DB_PATH))
+    bindings = load_bindings(bindings)
+    provider_factory = provider_factory or CCConnectProvider
+    now = time.time() if now is None else now
+
+    results = []
+    providers = {}
+    for message in store.list_open_messages(max_age_secs=max_age_secs, now=now):
+        if message.get("provider") != "cc_connect":
+            continue
+        anchor = message.get("delivered_at") or message.get("created_at") or 0.0
+        if now - anchor < min_age_secs:
+            # Young enough that the hook may still deliver it; don't race.
+            continue
+        binding = bindings.get("cc_connect", {}).get(message["target"])
+        if not binding:
+            continue
+        if message["target"] not in providers:
+            providers[message["target"]] = provider_factory(message["target"], binding)
+        provider = providers[message["target"]]
+        try:
+            events = provider.poll_events(cursor=str(anchor))
+        except (OSError, ValueError) as exc:
+            # Session files are cc-connect internals with no format contract;
+            # a parse failure must degrade to hook-only behavior, not crash
+            # the sweep for every other message.
+            results.append({
+                "status": "error",
+                "request_id": message["request_id"],
+                "target": message["target"],
+                "error": str(exc),
+            })
+            continue
+        for event in events:
+            reply = extract_relay_reply(event.content, message["request_id"])
+            if reply is None:
+                continue
+            current = store.get_message(message["request_id"])
+            if not current or current.get("status") not in ("pending", "delivered"):
+                break
+            store.append_event(
+                event_type="message.reconciled",
+                agent_id=message["target"],
+                request_id=message["request_id"],
+                session_key=message["session_key"],
+                content=reply,
+                timestamp=event.timestamp,
+            )
+            store.mark_replied(message["request_id"], reply, event.timestamp)
+            store.release_session_lock(message["session_key"], message["request_id"])
+            notify = queue_and_attempt_reply_notification(
+                store,
+                message,
+                reply,
+                bindings=bindings,
+                label="recovered",
+            )
+            results.append({
+                "status": "recovered",
+                "request_id": message["request_id"],
+                "target": message["target"],
+                "notify": notify,
+            })
+            break
+    return results
+
+
+def cmd_reconcile(args):
+    results = reconcile_messages(
+        min_age_secs=args.min_age,
+        max_age_secs=args.max_age,
+    )
+    if args.format == "json":
+        print(json.dumps(results, ensure_ascii=False))
+        return 0
+    if not results:
+        return 0
+    for item in results:
+        if item["status"] == "recovered":
+            print("recovered %s from %s (notify=%s)" % (
+                item["request_id"], item["target"], item["notify"]["status"],
+            ))
+        else:
+            print("reconcile error for %s (%s): %s" % (
+                item["request_id"], item["target"], item.get("error", ""),
+            ))
+    return 0
+
+
+def cmd_inbox(args):
+    state = StateStore(str(STATE_DB_PATH))
+    rows = state.list_notifications(
+        status=None if args.all else "open",
+        origin_project=args.origin_project,
+        origin_session_key=args.origin_session,
+        limit=args.limit,
+    )
+    if args.format == "json":
+        print(json.dumps(rows, ensure_ascii=False))
+        return 0
+    if not rows:
+        print("No queued relay notifications.")
+        return 0
+    for item in rows:
+        preview = " ".join((item.get("content") or "").split())
+        if len(preview) > 120:
+            preview = preview[:117] + "..."
+        print(
+            "%s id=%s request_id=%s origin=%s session=%s attempts=%s error=%s"
+            % (
+                item["status"],
+                item["id"],
+                item.get("request_id") or "-",
+                item["origin_project"],
+                item["origin_session_key"],
+                item["attempts"],
+                item.get("last_error") or "-",
+            )
+        )
+        print("  %s" % preview)
+    return 0
+
+
+def cmd_drain_notifications(args):
+    results = drain_notification_outbox(
+        origin_project=args.origin_project,
+        origin_session=args.origin_session,
+        force=args.force,
+        limit=args.limit,
+    )
+    if args.format == "json":
+        print(json.dumps(results, ensure_ascii=False))
+        return 0
+    for item in results:
+        print(
+            "%s outbox=%s request_id=%s origin=%s"
+            % (
+                item["status"],
+                item["id"],
+                item.get("request_id") or "-",
+                item["origin_project"],
+            )
+        )
+    return 0
 
 
 def format_status(agent):
@@ -1733,15 +2113,21 @@ def cmd_relay(args):
 
     # Notify the from-agent about the reply (only for cc_connect with valid session)
     if from_agent["provider"] == "cc_connect" and from_session:
-        notify = notify_origin_reply(
-            {"origin_project": from_name, "origin_session_key": from_session, "target": to_name},
+        notify = queue_and_attempt_reply_notification(
+            state,
+            {
+                "request_id": request_id,
+                "origin_project": from_name,
+                "origin_session_key": from_session,
+                "target": to_name,
+            },
             reply, bindings=bindings,
         )
-        if notify["status"] == "sent":
-            state.mark_notified(request_id, time.time())
-        elif notify["status"] == "failed":
-            state.mark_notify_failed(request_id, notify.get("error", "unknown"))
-            print("Warning: reply notification to '%s' failed: %s" % (from_name, notify.get("error", "")))
+        if notify["status"] == "queued":
+            print(
+                "Reply queued for '%s'; it will retry when that session becomes idle (outbox=%s)"
+                % (from_name, notify["outbox_id"])
+            )
     else:
         print("Note: reply not forwarded to '%s' (provider=%s, no session)" % (
             from_name, from_agent["provider"]))
@@ -1853,6 +2239,12 @@ def main(argv=None):
         return 0
     if args.command == "_on_hook":
         return cmd_on_hook(args)
+    if args.command == "reconcile":
+        return cmd_reconcile(args)
+    if args.command == "inbox":
+        return cmd_inbox(args)
+    if args.command == "_drain_notifications":
+        return cmd_drain_notifications(args)
     if args.command == "watch":
         return cmd_watch(args)
     if args.command == "groups":

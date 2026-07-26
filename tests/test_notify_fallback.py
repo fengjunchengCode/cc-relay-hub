@@ -1,6 +1,10 @@
+import io
+import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
 
@@ -80,13 +84,15 @@ class NotifyFallbackTest(unittest.TestCase):
 
         self.assertEqual(result["status"], "matched")
         self.assertEqual(result["notify"]["status"], "sent")
-        self.assertEqual(result["notify"].get("via"), "webhook")
+        self.assertEqual(result["notify"].get("via"), "outbox")
         webhook_mock.assert_called_once()
         # config send must not fire when webhook injection succeeded
         self.assertEqual(cli_calls, [])
 
-    def test_retryable_error_falls_back_to_webhook(self):
-        """Daemon-already-running error should fall back to webhook."""
+    def test_busy_webhook_failure_stays_queued_without_config_fallback(self):
+        """A failed agent injection must stay queued. Posting the reply to the
+        human chat through config send is not an acknowledgement that the
+        origin agent received it."""
         cli_calls = []
 
         def runner(command, input_text):
@@ -119,15 +125,12 @@ class NotifyFallbackTest(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "matched")
-        # CLI was called
-        self.assertEqual(len(cli_calls), 1)
-        # Notify fell through to webhook (which will fail since port 9999 isn't listening)
-        # but the point is it didn't stop at the CLI failure
-        notify = result["notify"]
-        self.assertIn(notify["status"], ("sent", "failed"))
+        self.assertEqual(result["notify"]["status"], "queued")
+        self.assertEqual(cli_calls, [])
+        self.assertEqual(len(self.store.list_notifications(status="pending")), 1)
 
-    def test_hard_error_does_not_fall_back(self):
-        """Routing errors (bad project/session) should NOT fall back."""
+    def test_webhook_network_error_does_not_fall_back_to_config(self):
+        """The durable outbox retries the only path that reaches the agent."""
         cli_calls = []
 
         def runner(command, input_text):
@@ -160,8 +163,9 @@ class NotifyFallbackTest(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "matched")
-        self.assertEqual(result["notify"]["status"], "failed")
-        self.assertIn("project not found", result["notify"]["error"])
+        self.assertEqual(result["notify"]["status"], "queued")
+        self.assertEqual(cli_calls, [])
+        self.assertIn("Connection refused", result["notify"]["error"])
 
     def test_webhook_skipped_recorded_as_failure(self):
         """When webhook fallback is unavailable, it should be recorded as failure."""
@@ -195,7 +199,7 @@ class NotifyFallbackTest(unittest.TestCase):
         self.assertEqual(message["status"], "replied")
         self.assertIsNone(message["notified_at"])
         self.assertIsNotNone(message["notify_error"])
-        self.assertIn("webhook fallback unavailable", message["notify_error"])
+        self.assertIn("webhook_missing", message["notify_error"])
 
     def test_config_missing_falls_back_to_webhook(self):
         """No config_path should fall back to webhook."""
@@ -225,9 +229,8 @@ class NotifyFallbackTest(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "matched")
-        # Falls through to webhook
         notify = result["notify"]
-        self.assertIn(notify["status"], ("sent", "failed"))
+        self.assertEqual(notify["status"], "queued")
 
     def test_missing_cc_connect_executable_falls_back_to_webhook(self):
         """FileNotFoundError from config send should not crash relay notification."""
@@ -257,7 +260,7 @@ class NotifyFallbackTest(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "matched")
-        self.assertIn(result["notify"]["status"], ("sent", "failed"))
+        self.assertEqual(result["notify"]["status"], "queued")
 
     def test_origin_webhook_notification_is_notice_not_request(self):
         """The reply forwarded to the origin must be a notice (expect_reply
@@ -297,6 +300,134 @@ class NotifyFallbackTest(unittest.TestCase):
         prompt = build_relay_prompt(envelope)
         self.assertIn("notice_id=", prompt)
         self.assertNotIn("request_id=", prompt)
+
+    def test_busy_reply_is_delivered_from_outbox_after_idle_signal(self):
+        with mock.patch.object(
+            hub,
+            "_send_via_origin_webhook",
+            return_value={
+                "status": "failed",
+                "error": "delivery not acknowledged: session busy",
+            },
+        ):
+            result = hub.handle_hook_event(
+                {
+                    "event": "message.sent",
+                    "project": "claude-bot",
+                    "session_key": "feishu:target:u1",
+                    "content": "[cc-relay reply_to=req-1]\npong",
+                    "timestamp": "2026-05-06T10:00:00+08:00",
+                },
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+            )
+
+        self.assertEqual(result["notify"]["status"], "queued")
+        pending = self.store.list_notifications(status="pending")
+        self.assertEqual(len(pending), 1)
+        self.assertIn("session busy", pending[0]["last_error"])
+
+        notice_ids = []
+
+        def delivered(origin_project, origin_session, binding, content, notice_id=None):
+            notice_ids.append(notice_id)
+            return {"status": "sent", "via": "webhook"}
+
+        with mock.patch.object(hub, "_send_via_origin_webhook", side_effect=delivered):
+            drained = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                origin_project="codex-bot",
+                origin_session="feishu:origin:u1",
+                force=True,
+                now=20.0,
+            )
+
+        self.assertEqual(drained[0]["status"], "delivered")
+        self.assertTrue(notice_ids[0].startswith("outbox-"))
+        self.assertEqual(
+            self.store.get_notification(pending[0]["id"])["status"],
+            "delivered",
+        )
+        self.assertEqual(self.store.get_message("req-1")["notified_at"], 20.0)
+
+    def test_outbox_preserves_fifo_when_origin_is_still_busy(self):
+        base = {
+            "request_id": "req-1",
+            "origin_project": "codex-bot",
+            "origin_session_key": "feishu:origin:u1",
+            "target": "claude-bot",
+        }
+        first = hub.enqueue_reply_notification(
+            self.store, base, "first", now=10.0
+        )
+        second = hub.enqueue_reply_notification(
+            self.store, base, "second", label="follow-up", now=11.0
+        )
+        calls = []
+
+        def still_busy(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"status": "failed", "error": "session busy"}
+
+        with mock.patch.object(hub, "_send_via_origin_webhook", side_effect=still_busy):
+            drained = hub.drain_notification_outbox(
+                state_path=self.db_path,
+                bindings={
+                    "cc_connect": {
+                        "codex-bot": {"webhook_port": 9999},
+                    }
+                },
+                origin_project="codex-bot",
+                origin_session="feishu:origin:u1",
+                force=True,
+                now=12.0,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([item["id"] for item in drained], [first["id"]])
+        self.assertEqual(
+            self.store.get_notification(second["id"])["attempts"],
+            0,
+        )
+
+    def test_inbox_json_exposes_pending_notifications(self):
+        hub.enqueue_reply_notification(
+            self.store,
+            {
+                "request_id": "req-1",
+                "origin_project": "codex-bot",
+                "origin_session_key": "feishu:origin:u1",
+                "target": "claude-bot",
+            },
+            "reply waiting",
+            now=10.0,
+        )
+        output = io.StringIO()
+        args = SimpleNamespace(
+            all=False,
+            origin_project="codex-bot",
+            origin_session="feishu:origin:u1",
+            limit=100,
+            format="json",
+        )
+        with mock.patch.object(hub, "STATE_DB_PATH", Path(self.db_path)), \
+                redirect_stdout(output):
+            exit_code = hub.cmd_inbox(args)
+
+        self.assertEqual(exit_code, 0)
+        rows = json.loads(output.getvalue())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "pending")
+        self.assertIn("reply waiting", rows[0]["content"])
 
 
 if __name__ == "__main__":

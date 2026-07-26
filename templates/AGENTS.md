@@ -17,6 +17,7 @@ cc-relay-hub groups                 # list groups and members
 cc-relay-hub send <agent> "task description"
 Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin
 cc-relay-hub send <agent> "status update" --no-reply
+cc-relay-hub inbox                    # diagnostic: queued replies not yet acknowledged by an origin session
 ```
 
 - For `cc_connect` agents, delivers via local webhook HTTP POST.
@@ -25,6 +26,7 @@ cc-relay-hub send <agent> "status update" --no-reply
 - Before sending, decide whether the message needs a reply.
 - If a reply is needed, use `send` without `--wait`; the target replies with `[cc-relay reply_to=...]`, and the hook server forwards that reply back to the origin session.
 - If no reply is needed, use `send --no-reply`; the target must not answer only to acknowledge it.
+- If the origin session is busy, the reply stays in the durable outbox and is retried automatically after that session's next final turn. Use `inbox` only to diagnose; do not poll it.
 - Do not use `cc-relay-hub watch`, `watch --loop`, shell polling, or `send --wait` to wait for private-message replies unless the user explicitly asks for a synchronous diagnostic wait.
 - Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.
 - If `info` shows `Provider: cdp`, still use `cc-relay-hub send <agent> "task"`; do not switch to `cc-connect relay`.

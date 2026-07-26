@@ -71,6 +71,34 @@ class StateStore(object):
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS notification_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dedupe_key TEXT NOT NULL UNIQUE,
+                        request_id TEXT,
+                        origin_project TEXT NOT NULL,
+                        origin_session_key TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        next_attempt_at REAL NOT NULL,
+                        last_attempt_at REAL,
+                        delivered_at REAL,
+                        last_error TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS notification_outbox_pending_idx
+                    ON notification_outbox (
+                        status, next_attempt_at, origin_project, origin_session_key, id
+                    )
+                    """
+                )
                 self._ensure_message_columns(conn)
         finally:
             conn.close()
@@ -216,6 +244,239 @@ class StateStore(object):
                     """,
                     _sanitize_params((event_type, agent_id, request_id, session_key, content, timestamp)),
                 )
+        finally:
+            conn.close()
+
+    def enqueue_notification(
+        self,
+        dedupe_key,
+        request_id,
+        origin_project,
+        origin_session_key,
+        target,
+        content,
+        created_at,
+    ):
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO notification_outbox (
+                        dedupe_key, request_id, origin_project, origin_session_key,
+                        target, content, status, attempts, created_at, next_attempt_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+                    """,
+                    _sanitize_params((
+                        dedupe_key,
+                        request_id,
+                        origin_project,
+                        origin_session_key,
+                        target,
+                        content,
+                        created_at,
+                        created_at,
+                    )),
+                )
+                row = conn.execute(
+                    "SELECT * FROM notification_outbox WHERE dedupe_key = ?",
+                    (_sanitize_text(dedupe_key),),
+                ).fetchone()
+                return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_notification(self, notification_id):
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM notification_outbox WHERE id = ?",
+                (notification_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_notifications(
+        self,
+        status=None,
+        origin_project=None,
+        origin_session_key=None,
+        due_at=None,
+        limit=100,
+    ):
+        clauses = []
+        params = []
+        if status == "open":
+            clauses.append("status IN ('pending', 'sending')")
+        elif status:
+            clauses.append("status = ?")
+            params.append(status)
+        if origin_project:
+            clauses.append("origin_project = ?")
+            params.append(origin_project)
+        if origin_session_key:
+            clauses.append("origin_session_key = ?")
+            params.append(origin_session_key)
+        if due_at is not None:
+            clauses.append("next_attempt_at <= ?")
+            params.append(due_at)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(int(limit))
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT * FROM notification_outbox
+                %s
+                ORDER BY id ASC
+                LIMIT ?
+                """ % where,
+                _sanitize_params(tuple(params)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+    def claim_notifications(
+        self,
+        origin_project=None,
+        origin_session_key=None,
+        due_at=None,
+        limit=100,
+        stale_after_secs=30.0,
+    ):
+        now = time.time() if due_at is None else due_at
+        clauses = ["status = 'pending'"]
+        params = []
+        if origin_project:
+            clauses.append("origin_project = ?")
+            params.append(origin_project)
+        if origin_session_key:
+            clauses.append("origin_session_key = ?")
+            params.append(origin_session_key)
+        if due_at is not None:
+            clauses.append("next_attempt_at <= ?")
+            params.append(due_at)
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                UPDATE notification_outbox
+                SET status = 'pending'
+                WHERE status = 'sending'
+                  AND (last_attempt_at IS NULL OR last_attempt_at <= ?)
+                """,
+                (now - max(float(stale_after_secs), 0.0),),
+            )
+            rows = conn.execute(
+                """
+                SELECT * FROM notification_outbox
+                WHERE %s
+                ORDER BY id ASC
+                LIMIT ?
+                """ % " AND ".join(clauses),
+                _sanitize_params(tuple(params + [int(limit)])),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            for notification_id in ids:
+                conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'sending', last_attempt_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (now, notification_id),
+                )
+            conn.commit()
+            return [self.get_notification(notification_id) for notification_id in ids]
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_notification_claim(self, notification_id):
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'pending'
+                    WHERE id = ? AND status = 'sending'
+                    """,
+                    (notification_id,),
+                )
+        finally:
+            conn.close()
+
+    def mark_notification_delivered(self, notification_id, delivered_at):
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'delivered', delivered_at = ?, last_attempt_at = ?,
+                        attempts = attempts + 1, last_error = NULL
+                    WHERE id = ?
+                    """,
+                    (delivered_at, delivered_at, notification_id),
+                )
+        finally:
+            conn.close()
+
+    def mark_notification_failed(
+        self,
+        notification_id,
+        error,
+        attempted_at,
+        next_attempt_at,
+    ):
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'pending', attempts = attempts + 1,
+                        last_attempt_at = ?, next_attempt_at = ?, last_error = ?
+                    WHERE id = ?
+                    """,
+                    _sanitize_params((
+                        attempted_at,
+                        next_attempt_at,
+                        error,
+                        notification_id,
+                    )),
+                )
+        finally:
+            conn.close()
+
+    def list_open_messages(self, max_age_secs=None, now=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            if max_age_secs is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE status IN ('pending', 'delivered')
+                    ORDER BY created_at ASC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE status IN ('pending', 'delivered') AND created_at >= ?
+                    ORDER BY created_at ASC
+                    """,
+                    (now - float(max_age_secs),),
+                ).fetchall()
+            return [dict(row) for row in rows]
         finally:
             conn.close()
 

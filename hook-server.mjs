@@ -180,6 +180,101 @@ function forwardToHub(payload) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Durable reply outbox
+//
+// cc-connect v1.3 acknowledges /hook with HTTP 200 before it checks whether
+// the target agent session is already running. If it is, the daemon logs
+// "session busy, queued prompt dropped" and discards the prompt. hub.py keeps
+// those reply notifications in SQLite. Every message.sent event is a useful
+// idle edge for that exact project/session, including ordinary final turns
+// that are not relay replies, so drain its queue shortly after the hook
+// returns.
+// ---------------------------------------------------------------------------
+const IDLE_DRAIN_DELAY_MS = parseInt(process.env.IDLE_DRAIN_DELAY_MS || "900", 10);
+const STARTUP_DRAIN_DELAY_MS = parseInt(
+  process.env.STARTUP_DRAIN_DELAY_MS || "1500",
+  10,
+);
+const drainTimers = new Map();
+
+function runNotificationDrain(project, session, force = false) {
+  const python = resolvePython();
+  if (!python) return;
+  const args = [...python.args, hubScript, "_drain_notifications"];
+  if (project) args.push("--origin-project", project);
+  if (session) args.push("--origin-session", session);
+  if (force) args.push("--force");
+  const child = spawn(python.command, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", chunk => {
+    const text = String(chunk).trim();
+    if (text) console.log(`[outbox] ${text}`);
+  });
+  child.stderr.on("data", chunk => {
+    const text = String(chunk).trim();
+    if (text) console.error(`[outbox] ${text}`);
+  });
+  child.on("error", err => {
+    console.error("outbox drain error:", err.message);
+  });
+}
+
+function scheduleNotificationDrain(event) {
+  const project = event.project || event.agent_id || "";
+  const session = event.session_key || "";
+  if (!project || !session) return;
+  const key = `${project}\0${session}`;
+  const existing = drainTimers.get(key);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    drainTimers.delete(key);
+    runNotificationDrain(project, session, true);
+  }, Math.max(IDLE_DRAIN_DELAY_MS, 0));
+  timer.unref();
+  drainTimers.set(key, timer);
+}
+
+// ---------------------------------------------------------------------------
+// Periodic reconcile: cc-connect never fires the message.sent hook for
+// unsolicited turns, so a long task's final report (valid marker and all)
+// bypasses this server entirely. Sweeping session history via `hub.py
+// reconcile` recovers those replies; the hook remains the fast path.
+// ---------------------------------------------------------------------------
+const RECONCILE_INTERVAL = parseInt(process.env.RECONCILE_INTERVAL_SECS || "45", 10);
+let reconcileRunning = false;
+
+function runReconcile() {
+  if (reconcileRunning) return;
+  const python = resolvePython();
+  if (!python) return;
+  reconcileRunning = true;
+  const child = spawn(python.command, [...python.args, hubScript, "reconcile"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", chunk => {
+    const text = String(chunk).trim();
+    if (text) console.log(`[reconcile] ${text}`);
+  });
+  child.stderr.on("data", chunk => {
+    const text = String(chunk).trim();
+    if (text) console.error(`[reconcile] ${text}`);
+  });
+  child.on("error", err => {
+    reconcileRunning = false;
+    console.error("reconcile error:", err.message);
+  });
+  child.on("exit", () => {
+    reconcileRunning = false;
+    runNotificationDrain(null, null, false);
+  });
+}
+
+if (RECONCILE_INTERVAL > 0) {
+  setInterval(runReconcile, RECONCILE_INTERVAL * 1000).unref();
+}
+
 http.createServer((req, res) => {
   // --- Long-poll endpoint for event streaming ---
   if (req.method === "GET" && req.url.startsWith("/events/longpoll")) {
@@ -204,6 +299,7 @@ http.createServer((req, res) => {
       // direct chat with the agent) to avoid cross-contamination.
       const content = event.content || "";
       const isRelayReply = /\[cc-relay reply_to=/.test(content);
+      scheduleNotificationDrain(event);
       if (!isRelayReply) {
         res.statusCode = 204;
         return res.end();
@@ -231,4 +327,9 @@ http.createServer((req, res) => {
   });
 }).listen(PORT, "127.0.0.1", () => {
   console.log(`hook server listening on http://127.0.0.1:${PORT}`);
+  const startupDrain = setTimeout(
+    () => runNotificationDrain(null, null, false),
+    Math.max(STARTUP_DRAIN_DELAY_MS, 0),
+  );
+  startupDrain.unref();
 });

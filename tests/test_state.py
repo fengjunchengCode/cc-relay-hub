@@ -112,6 +112,95 @@ class StateStoreTest(unittest.TestCase):
             conn.close()
         self.assertEqual(event[0], "event?content")
 
+    def test_notification_outbox_is_fifo_and_deduplicated(self):
+        first = self.store.enqueue_notification(
+            dedupe_key="same",
+            request_id="req-1",
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+            target="my-project",
+            content="first",
+            created_at=100.0,
+        )
+        duplicate = self.store.enqueue_notification(
+            dedupe_key="same",
+            request_id="req-1",
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+            target="my-project",
+            content="first",
+            created_at=101.0,
+        )
+        second = self.store.enqueue_notification(
+            dedupe_key="other",
+            request_id="req-1",
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+            target="my-project",
+            content="follow-up",
+            created_at=102.0,
+        )
+
+        self.assertEqual(first["id"], duplicate["id"])
+        self.assertNotEqual(first["id"], second["id"])
+        rows = self.store.list_notifications(status="pending")
+        self.assertEqual([row["content"] for row in rows], ["first", "follow-up"])
+
+    def test_notification_outbox_tracks_retry_and_delivery(self):
+        item = self.store.enqueue_notification(
+            dedupe_key="one",
+            request_id="req-1",
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+            target="my-project",
+            content="reply",
+            created_at=100.0,
+        )
+        self.store.mark_notification_failed(
+            item["id"],
+            "session busy",
+            attempted_at=101.0,
+            next_attempt_at=103.0,
+        )
+
+        pending = self.store.get_notification(item["id"])
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["attempts"], 1)
+        self.assertEqual(pending["last_error"], "session busy")
+        self.assertEqual(
+            self.store.list_notifications(status="pending", due_at=102.0),
+            [],
+        )
+
+        self.store.mark_notification_delivered(item["id"], 104.0)
+        delivered = self.store.get_notification(item["id"])
+        self.assertEqual(delivered["status"], "delivered")
+        self.assertEqual(delivered["attempts"], 2)
+        self.assertEqual(delivered["delivered_at"], 104.0)
+        self.assertIsNone(delivered["last_error"])
+
+    def test_notification_claim_prevents_parallel_drains(self):
+        item = self.store.enqueue_notification(
+            dedupe_key="claim-once",
+            request_id="req-1",
+            origin_project="codex-bot",
+            origin_session_key="feishu:origin:u1",
+            target="my-project",
+            content="reply",
+            created_at=100.0,
+        )
+
+        first_claim = self.store.claim_notifications(due_at=100.0)
+        second_claim = self.store.claim_notifications(due_at=100.0)
+
+        self.assertEqual([row["id"] for row in first_claim], [item["id"]])
+        self.assertEqual(second_claim, [])
+        self.store.release_notification_claim(item["id"])
+        self.assertEqual(
+            [row["id"] for row in self.store.claim_notifications(due_at=100.0)],
+            [item["id"]],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

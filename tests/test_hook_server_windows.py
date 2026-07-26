@@ -69,6 +69,8 @@ class HookServerWindowsCompatTest(unittest.TestCase):
             env["HOOK_PORT"] = str(port)
             env["HOOK_EVENTS_FILE"] = str(tmp / "events.jsonl")
             env["HOME"] = str(tmp)
+            env["RECONCILE_INTERVAL_SECS"] = "0"
+            env["IDLE_DRAIN_DELAY_MS"] = "10000"
 
             server = subprocess.Popen(
                 ["node", str(ROOT / "hook-server.mjs")],
@@ -109,6 +111,76 @@ class HookServerWindowsCompatTest(unittest.TestCase):
 
         self.assertIn("fileURLToPath(import.meta.url)", source)
         self.assertNotIn("new URL(import.meta.url).pathname", source)
+
+    def test_non_relay_turn_end_drains_only_that_session_outbox(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            fake_python = tmp / "python"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = \"-c\" ]; then exit 0; fi\n"
+                "printf '%s\\n' \"$*\" >> \"$DRAIN_LOG\"\n"
+                "cat >/dev/null\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_python.chmod(0o755)
+            drain_log = tmp / "drain.log"
+            events_file = tmp / "events.jsonl"
+            port = _free_port()
+            env = dict(os.environ)
+            env["PYTHON_BIN"] = str(fake_python)
+            env["DRAIN_LOG"] = str(drain_log)
+            env["HOOK_PORT"] = str(port)
+            env["HOOK_EVENTS_FILE"] = str(events_file)
+            env["IDLE_DRAIN_DELAY_MS"] = "50"
+            env["RECONCILE_INTERVAL_SECS"] = "0"
+
+            server = subprocess.Popen(
+                ["node", str(ROOT / "hook-server.mjs")],
+                cwd=str(ROOT),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertTrue(_wait_for_port(port), "hook server did not start")
+                payload = json.dumps(
+                    {
+                        "event": "message.sent",
+                        "project": "agent-a",
+                        "session_key": "session-a",
+                        "content": "ordinary final answer without relay marker",
+                    }
+                ).encode("utf-8")
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/cc-connect/hooks/reply",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    self.assertEqual(resp.status, 204)
+
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    if drain_log.exists() and "--origin-project agent-a" in drain_log.read_text():
+                        break
+                    time.sleep(0.05)
+            finally:
+                server.send_signal(signal.SIGTERM)
+                server.communicate(timeout=5)
+
+            calls = drain_log.read_text(encoding="utf-8")
+            self.assertIn(
+                "_drain_notifications --origin-project agent-a "
+                "--origin-session session-a --force",
+                calls,
+            )
+            # Ordinary chat content is an idle signal only; it must not enter
+            # the relay event stream or hook audit file.
+            self.assertFalse(events_file.exists())
 
 
 if __name__ == "__main__":

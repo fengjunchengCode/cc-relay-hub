@@ -37,6 +37,8 @@ cc-relay-hub adds that private agent-to-agent handoff. Agents can discover peers
 - 🧭 **Let agents find the right teammate** — `cc-relay-hub list` shows live peers, while generated project instructions teach new agents how to use them.
 - 🧩 **Bridge CLI agents and IDE agents** — Use cc-connect-backed agents for Claude Code and Codex, and CDP-backed agents for Electron IDEs such as Antigravity.
 - ⏳ **Close replies without blocking** — plain `send` returns immediately while the hook server forwards marked replies back to the origin chat.
+- 📥 **Do not lose replies to busy sessions** — replies wait in a durable
+  outbox and retry after the origin agent finishes its current turn.
 
 ## 🛤️ Why I built this
 
@@ -101,6 +103,7 @@ cc-relay-hub list
 cc-relay-hub send <agent> "task"
 Get-Content task.md -Raw | cc-relay-hub send <agent> --stdin
 cc-relay-hub send <agent> "status update" --no-reply
+cc-relay-hub inbox
 cc-relay-hub relay <from-agent> <to-agent> "task"  # synchronous diagnostic handoff
 cc-relay-hub watch
 ```
