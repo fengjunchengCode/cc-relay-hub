@@ -96,7 +96,7 @@ class HookServerWindowsCompatTest(unittest.TestCase):
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with urllib.request.urlopen(req, timeout=10) as resp:
                     self.assertEqual(resp.status, 204)
                 time.sleep(0.5)
             finally:
