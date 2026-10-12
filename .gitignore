@@ -16,3 +16,8 @@ bindings.json
 /.cursorrules
 *.bak
 .cc-relay-hub/
+
+# cross-node identity (never commit the cluster secret)
+cluster.secret
+node.json
+node.pid

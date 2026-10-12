@@ -31,6 +31,7 @@ The wrapper command is `cc-relay-hub`. It invokes `hub.py` with Python 3.9+.
 | `cc-relay-hub send <agent> "<msg>" --wait` | Send and wait for the matched reply; use only for explicit synchronous diagnostics |
 | `cc-relay-hub send <agent> "<msg>" --no-reply` | Send without a reply marker or pending session lock |
 | `cc-relay-hub send <agent> "<msg>" --group <group>` | Resolve the target within a group |
+| `cc-relay-hub send <agent> "<msg>" --private` | Confirm an intentionally private send when invoked from a named group chat |
 | `cc-relay-hub send <agent> --stdin` | Read the full message from stdin |
 | `cc-relay-hub send <agent> --message-file task.md` | Read the full message from a UTF-8 file |
 | `cc-relay-hub groups` | List groups |
@@ -60,6 +61,12 @@ cc-relay-hub info antigravity-ide
 cc-relay-hub cdp status antigravity-ide
 cc-relay-hub send antigravity-ide "task"
 ```
+
+Choose the conversation surface first. Use `cc-connect relay send` when the user
+wants a discussion visible in the current bound group chat. Use
+`cc-relay-hub send` for private agent-to-agent delegation. When the origin is a
+named group chat, hub `send` fails closed unless `--private` confirms that the
+user explicitly requested private delegation.
 
 For private agent-to-agent messages, decide before sending whether a reply is needed. If a reply is needed, use plain `send` and return; the target's `[cc-relay reply_to=...]` answer is forwarded by the hook server. If no reply is needed, use `--no-reply`. Do not use `watch`, `watch --loop`, raw long-poll, shell polling, or `send --wait` to wait from an agent conversation unless a human explicitly asks for a synchronous diagnostic wait.
 

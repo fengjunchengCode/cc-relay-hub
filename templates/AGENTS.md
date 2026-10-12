@@ -3,6 +3,11 @@
 You are connected to **cc-relay-hub**, a local multi-agent message router.
 Use it to discover peers, check health, and delegate work to other agents.
 
+cc-relay-hub is a **private** agent-to-agent channel. When the user wants the
+exchange visible in a bound group chat—for example, "discuss this in the group"
+or "let both bots talk here"—use `cc-connect relay send` instead. An explicit
+visibility request always overrides the default private routing.
+
 ## Discovery
 
 ```bash
@@ -23,6 +28,9 @@ cc-relay-hub inbox                    # diagnostic: queued replies not yet ackno
 - For `cc_connect` agents, delivers via local webhook HTTP POST.
 - For `cdp` agents such as Antigravity, delivers through the local Chrome DevTools Protocol session into the IDE agent chat.
 - Always check `info <agent>` before sending.
+- In a named group chat, `cc-relay-hub send` is blocked unless `--private` is
+  supplied. Use that override only when the user explicitly requested a private
+  delegation from the group.
 - Before sending, decide whether the message needs a reply.
 - If a reply is needed, use `send` without `--wait`; the target replies with `[cc-relay reply_to=...]`, and the hook server forwards that reply back to the origin session.
 - If no reply is needed, use `send --no-reply`; the target must not answer only to acknowledge it.
@@ -111,6 +119,22 @@ PY
 - Try `cc-connect send --image` first; use this fallback when it returns `230002`.
 - For non-image files: upload via `POST /open-apis/im/v1/files` (multipart `file_type` +
   `file`) to get a `file_key`, then send with `msg_type:"file"`, `content:{"file_key":...}`.
+- **Videos are not generic files.** If the user asks for an MP4/video preview, do not send it
+  as `file_type:"stream"` + `msg_type:"file"`; Feishu will show it as a generic download,
+  not an inline MP4/video. Use the cc-relay-hub helper, which sends video as
+  `file_type:"mp4"` + `msg_type:"media"` and includes a thumbnail:
+
+```bash
+VIDEO="/absolute/path/to/clip.mp4"
+THUMB="${VIDEO%.mp4}.jpg"
+ffmpeg -y -hide_banner -loglevel error -ss 2 -i "$VIDEO" -frames:v 1 "$THUMB"
+CC_PROJECT="${CC_PROJECT:-codex-bot}" \
+CC_CONFIG="${CC_CONFIG:-$HOME/.cc-connect/config-codex.toml}" \
+python3 "$HOME/.cc-connect/cc-relay-hub/bin/feishu-send.py" --video "$VIDEO" --thumb "$THUMB"
+```
+
+  For non-Codex projects, set `CC_CONFIG` to that project's active cc-connect config
+  before running the helper. Success prints `video -> 0 success <path>`.
 
 **Real Feishu mentions.** Plain text like `@冯均成` does not notify the user. To
 trigger a real mention, send a Feishu `post` message by `open_id` with an `at`
@@ -174,3 +198,21 @@ When you use `send`, `info`, or `relay`, the agent name is resolved as:
 3. **Same-group preference** — among fuzzy matches, the agent in your group is preferred. You are identified by the `CC_PROJECT` environment variable.
 
 If multiple agents match and you're unsure, use `cc-relay-hub list` to see exact names.
+
+## Cross-Node (Other Computers)
+
+Agents on other computers show up in `cc-relay-hub list` under **Remote agents** and are addressed as `name@node`:
+
+```bash
+cc-relay-hub list                                # remote agents: codex-bot@office
+cc-relay-hub send codex-bot@office "task"        # reply returns to this conversation
+cc-relay-hub send codex-bot@office "notice" --no-reply
+cc-relay-hub node status                         # peers, paths (lan/wan/relay), outbox
+```
+
+- A bare name resolves on this computer first and falls back to remote nodes only when no local agent matches. If several nodes have the same agent name, use the full `name@node`.
+- Group isolation applies across computers: the sender and `name@node` must share a group (or both be ungrouped).
+- If the target node is offline, `send` prints `queued` and exits 0; the node daemon delivers when the peer returns and the reply still comes back here. Add `--no-queue` to fail instead.
+- Requests from another computer start with an `Origin: <agent>@<node>` line. Treat them like any other cc-relay request and reply with the marker.
+- Joining a new computer: run `cc-relay-hub node invite` here and give the printed `ccrelay://join/...` string to the agent on the new computer, which runs `cc-relay-hub node join <string>`. Never post the string in a public chat.
+- `cc-relay-hub node doctor` explains connectivity problems and the fix for each.

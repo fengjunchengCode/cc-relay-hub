@@ -108,6 +108,11 @@ cc-relay-hub watch
 
 私信默认是异步的：发出任务后，目标 agent 带标记的回复会由 hook server 转回发起会话。如果发起会话还在思考，回复会保存在 outbox，Hub 不会定时反复撞 busy session；等该回合结束产生明确 idle edge 后只重投一次。`cc-relay-hub inbox` 可查看尚未确认送达的回复。除非用户明确要求同步诊断等待，否则 agent 会话里不要开启监听，也不要用 `--wait` 等回复。
 
+通道必须先分清：用户要求在已绑定群聊中公开讨论时，使用
+`cc-connect relay send`；需要私下委派时，才使用 `cc-relay-hub send`。
+如果来源是命名群聊，Hub 默认拒绝 `send`，只有用户明确要求私下委派时才允许
+加 `--private`，避免把公开讨论静默切换到私信通道。
+
 ## 💬 典型场景
 
 ### 1. Claude 把实现任务 relay 给 Codex

@@ -34,7 +34,7 @@ else:
 
 
 DATA_DIR = Path.home() / ".cc-connect"
-HUB_DIR = DATA_DIR / "cc-relay-hub"
+HUB_DIR = Path(os.environ.get("CC_RELAY_HUB_DIR") or (DATA_DIR / "cc-relay-hub"))
 HUB_BIN = HUB_DIR / "bin" / "cc-relay-hub"
 REGISTRY_PATH = HUB_DIR / "registry.json"
 BINDINGS_PATH = HUB_DIR / "bindings.json"
@@ -43,6 +43,153 @@ STATE_DB_PATH = HUB_DIR / "state.db"
 SOURCE_DIR = Path(__file__).resolve().parent
 SOURCE_TEMPLATE_DIR = SOURCE_DIR / "templates"
 DEFAULT_HOOK_PORT = int(os.environ.get("CC_RELAY_HOOK_PORT") or os.environ.get("HOOK_PORT") or "9121")
+NODE_JSON_PATH = HUB_DIR / "node.json"
+LOCAL_NODE_ALIASES = ("local", "here", "localhost")
+REMOTE_AGENT_STALE_SECS = 180.0
+
+
+# ---------------------------------------------------------------------------
+# Cross-node helpers (node identity, daemon API, agent@node addressing)
+# ---------------------------------------------------------------------------
+def _local_node():
+    from core import node_identity
+    try:
+        return node_identity.load_node(HUB_DIR)
+    except (OSError, ValueError):
+        return None
+
+
+def local_node_id():
+    node = _local_node()
+    return (node or {}).get("node_id")
+
+
+def _remote_agents_available():
+    return NODE_JSON_PATH.exists()
+
+
+def node_api_url(path=""):
+    node = _local_node() or {}
+    port = int(node.get("listen_port") or 9130)
+    return "http://127.0.0.1:%d%s" % (port, path)
+
+
+class NodeDaemonUnavailable(RuntimeError):
+    pass
+
+
+def node_api(method, path, payload=None, timeout=25.0):
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(node_api_url(path), data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as err:
+        body = err.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = {"error": body.strip() or ("HTTP %s" % err.code)}
+        raise RuntimeError(parsed.get("error") or ("HTTP %s" % err.code))
+    except (urllib.error.URLError, OSError) as err:
+        raise NodeDaemonUnavailable(
+            "node daemon is not running (%s). Start it with: cc-relay-hub node start" % getattr(err, "reason", err)
+        )
+    try:
+        return json.loads(body) if body.strip() else {}
+    except ValueError:
+        return {"raw": body}
+
+
+def parse_agent_address(query):
+    query = (query or "").strip()
+    if "@" in query:
+        name, node = query.rsplit("@", 1)
+        return name.strip(), (node.strip() or None)
+    return query, None
+
+
+def _load_remote_agents(store=None):
+    if store is None:
+        if not _remote_agents_available() or not STATE_DB_PATH.exists():
+            return []
+        store = StateStore(str(STATE_DB_PATH))
+    return store.list_remote_agents()
+
+
+def _remote_entry(item):
+    last_seen = item.get("node_last_seen_at") or 0
+    online = bool(last_seen) and (time.time() - float(last_seen)) <= REMOTE_AGENT_STALE_SECS
+    return {
+        "name": item["name"],
+        "type": item.get("type") or "?",
+        "provider": item.get("provider") or "?",
+        "work_dir": item.get("work_dir") or "",
+        "groups": list(item.get("groups") or []),
+        "node_id": item["node_id"],
+        "node_name": item.get("node_name") or item["node_id"],
+        "node_path": item.get("node_path") or "",
+        "node_last_seen_at": last_seen,
+        "online": online,
+        "health": item.get("health") or "",
+        "has_session": bool(item.get("has_session")),
+        "remote": True,
+        "binding": {},
+    }
+
+
+def remote_agent_label(agent):
+    return "%s@%s" % (agent["name"], agent.get("node_name") or agent.get("node_id"))
+
+
+def _node_matches(item, node_query):
+    node_query = (node_query or "").strip()
+    if not node_query:
+        return True
+    node_id = item.get("node_id") or ""
+    node_name = item.get("node_name") or ""
+    return node_name == node_query or node_id == node_query or node_id.startswith(node_query) \
+        or node_id.startswith("n_" + node_query)
+
+
+def resolve_remote_agent(name, node=None, sender_groups=None, store=None):
+    """Resolve an agent on another node. Raises KeyError when not found or ambiguous."""
+    items = [i for i in _load_remote_agents(store) if _node_matches(i, node)]
+    if node and not items:
+        raise KeyError("Unknown node: %s (run `cc-relay-hub peer list`)" % node)
+    exact = [i for i in items if i["name"] == name]
+    candidates = exact or [i for i in items if name in i["name"] or i.get("type") == name]
+    if not candidates:
+        label = "%s@%s" % (name, node) if node else name
+        raise KeyError("Unknown agent: %s" % label)
+    if len(candidates) > 1 and sender_groups:
+        same_group = [i for i in candidates if set(i.get("groups") or []) & set(sender_groups)]
+        if len(same_group) == 1:
+            candidates = same_group
+    if len(candidates) > 1:
+        names = ", ".join(sorted(remote_agent_label(_remote_entry(i)) for i in candidates))
+        raise KeyError("Multiple agents match '%s' across nodes: %s. Use the full name@node." % (name, names))
+    return _remote_entry(candidates[0])
+
+
+def get_agent_groups_entry(registry, agent):
+    if agent.get("remote"):
+        return list(agent.get("groups") or [])
+    return get_agent_groups(registry, agent["name"])
+
+
+def check_group_compatibility_entry(registry, sender, target_entry):
+    sender_groups = set(get_agent_groups(registry, sender))
+    target_groups = set(get_agent_groups_entry(registry, target_entry))
+    if not sender_groups and not target_groups:
+        return True
+    if not sender_groups or not target_groups:
+        return False
+    return bool(sender_groups & target_groups)
 
 
 def parse_args(argv):
@@ -60,8 +207,14 @@ def parse_args(argv):
     send_parser.add_argument("--no-reply", action="store_true", help="Send a notice without a reply marker or pending session lock")
     send_parser.add_argument("--timeout", type=int, default=300)
     send_parser.add_argument("--group", default=None, help="Target group for agent lookup")
+    send_parser.add_argument(
+        "--private",
+        action="store_true",
+        help="Confirm private hub delivery when the origin is a named group chat",
+    )
     send_parser.add_argument("--origin-project", default=None, help=argparse.SUPPRESS)
     send_parser.add_argument("--origin-session", default=None, help=argparse.SUPPRESS)
+    send_parser.add_argument("--no-queue", action="store_true", help="Fail instead of queueing when a remote node is unreachable")
 
     info_parser = subparsers.add_parser("info")
     info_parser.add_argument("agent")
@@ -76,7 +229,7 @@ def parse_args(argv):
         "--scope",
         choices=["cwd", "global", "workdirs", "all"],
         default="all",
-        help="Where to install context files (default: all)",
+        help="Where to install context files (default: all = global files, plus work dirs only for agents without a global file)",
     )
     ctx_parser.add_argument("--project", default=None, help=argparse.SUPPRESS)
     subparsers.add_parser("_on_hook", help=argparse.SUPPRESS)
@@ -138,6 +291,39 @@ def parse_args(argv):
     watch_parser.add_argument("--timeout", type=int, default=30, help="Per-request timeout in seconds (default: 30)")
     watch_parser.add_argument("--loop", action="store_true", help="Continuously poll until Ctrl-C (default: one-shot)")
     watch_parser.add_argument("--format", choices=["json", "text"], default="json")
+
+    # Cross-node daemon and cluster membership
+    node_parser = subparsers.add_parser("node", help="Cross-node daemon: start/status/invite/join")
+    node_sub = node_parser.add_subparsers(dest="node_command")
+    p_start = node_sub.add_parser("start", help="Run the node daemon in the foreground (creates node.json on first run)")
+    p_start.add_argument("--name", default=None, help="Node name (default: hostname)")
+    p_start.add_argument("--port", type=int, default=None, help="Listen port (default 9130)")
+    p_start.add_argument("--rendezvous", default=None, help="Rendezvous URL (default https://ntfy.sh)")
+    p_install = node_sub.add_parser("install", help="Install the node daemon as a login service and start it")
+    p_install.add_argument("--name", default=None)
+    p_install.add_argument("--port", type=int, default=None)
+    p_install.add_argument("--rendezvous", default=None)
+    node_sub.add_parser("uninstall", help="Remove the login service")
+    node_sub.add_parser("stop", help="Stop the running node daemon")
+    node_sub.add_parser("restart", help="Restart the node daemon service")
+    p_status = node_sub.add_parser("status", help="Show node, peers and paths")
+    p_status.add_argument("--json", action="store_true")
+    node_sub.add_parser("invite", help="Print the join string for a new machine")
+    p_join = node_sub.add_parser("join", help="Join a cluster with an invite string")
+    p_join.add_argument("invite")
+    p_doctor = node_sub.add_parser("doctor", help="Diagnose cross-node connectivity")
+    p_doctor.add_argument("--json", action="store_true")
+    node_sub.add_parser("discover", help="Show nodes seen on the LAN that are not in this cluster")
+
+    peer_parser = subparsers.add_parser("peer", help="Manage known peer nodes")
+    peer_sub = peer_parser.add_subparsers(dest="peer_command")
+    p_plist = peer_sub.add_parser("list", help="List peer nodes")
+    p_plist.add_argument("--json", action="store_true")
+    p_padd = peer_sub.add_parser("add", help="Add a peer by direct address (host:port) for cross-network direct paths")
+    p_padd.add_argument("address")
+    p_padd.add_argument("--name", default=None)
+    p_prm = peer_sub.add_parser("remove", help="Forget a peer node")
+    p_prm.add_argument("node")
 
     # CDP provider subcommands
     cdp_parser = subparsers.add_parser("cdp", help="CDP provider management")
@@ -293,6 +479,58 @@ def active_session_key(session_file):
     return best_key or next(iter(active.keys()))
 
 
+def origin_group_chat_name(bindings, origin_project, origin_session):
+    """Return a human-readable group name when cc-connect metadata proves group context.
+
+    Feishu private chats currently store their opaque ``oc_...`` chat id as
+    ``chat_name``. Named group chats store a human-readable name instead. The
+    session key alone cannot distinguish those two cases, so this deliberately
+    uses persisted cc-connect metadata and returns ``None`` when uncertain.
+    """
+    if not origin_project or not origin_session:
+        return None
+    parts = origin_session.split(":")
+    if len(parts) < 2 or parts[0] != "feishu":
+        return None
+    chat_id = parts[1]
+
+    data_dirs = []
+    binding = (bindings.get("cc_connect") or {}).get(origin_project) or {}
+    configured_dir = binding.get("data_dir")
+    if configured_dir:
+        data_dirs.append(Path(os.path.expanduser(str(configured_dir))))
+    if DATA_DIR not in data_dirs:
+        data_dirs.append(DATA_DIR)
+
+    seen = set()
+    for data_dir in data_dirs:
+        sessions_dir = data_dir / "sessions"
+        if not sessions_dir.exists():
+            continue
+        session_files = sorted(
+            sessions_dir.glob("%s_*.json" % origin_project),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for session_file in session_files:
+            resolved = str(session_file.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                data = load_json(session_file)
+            except (OSError, json.JSONDecodeError):
+                continue
+            metadata = (data.get("user_meta") or {}).get(origin_session) or {}
+            chat_name = str(metadata.get("chat_name") or "").strip()
+            if not chat_name or chat_name == chat_id:
+                continue
+            if chat_name.startswith(("oc_", "ou_")):
+                continue
+            return chat_name
+    return None
+
+
 def load_legacy_agent_config():
     if not LEGACY_CONFIG_PATH.exists():
         return {}
@@ -397,6 +635,23 @@ def _build_agent_entry(registry, bindings, agent_name, strict_binding=False):
 
 
 def resolve_agent(registry, bindings, query, sender=None, group=None):
+    """Resolve `name` or `name@node`: local registry first, then remote nodes."""
+    name, node_query = parse_agent_address(query)
+    sender_groups = get_agent_groups(registry, sender) if sender else None
+    if node_query and node_query not in LOCAL_NODE_ALIASES:
+        return resolve_remote_agent(name, node=node_query, sender_groups=sender_groups)
+    try:
+        return _resolve_local_agent(registry, bindings, name, sender=sender, group=group)
+    except KeyError as local_error:
+        if group or node_query or "Unknown agent" not in str(local_error) or not _remote_agents_available():
+            raise
+        try:
+            return resolve_remote_agent(name, sender_groups=sender_groups)
+        except KeyError:
+            raise local_error
+
+
+def _resolve_local_agent(registry, bindings, query, sender=None, group=None):
     """Resolve agent by exact name, then by type/prefix with same-group preference.
 
     1. Exact name match → return immediately (strict binding check).
@@ -917,6 +1172,42 @@ def drain_notification_outbox(
     return results
 
 
+def forward_reply_to_origin_node(store, message, reply_text, label=None, now=None):
+    """The request came from another node: ship the reply back through the peer outbox."""
+    from core import peer_protocol
+    me = _local_node() or {}
+    kind = "followup" if label else "reply"
+    envelope = peer_protocol.new_envelope(
+        kind,
+        me.get("node_id") or "",
+        message["origin_node"],
+        {
+            "request_id": message["request_id"],
+            "reply": reply_text,
+            "label": label,
+            "target": message.get("target"),
+            "origin_project": message.get("origin_project"),
+            "origin_session_key": message.get("origin_session_key"),
+        },
+        from_name=me.get("name"),
+        ts=now,
+    )
+    item = store.enqueue_peer_envelope(envelope, now=now, ttl_secs=48 * 3600)
+    try:
+        node_api("POST", "/api/v1/kick", {"to_node": message["origin_node"]}, timeout=3.0)
+        kicked = True
+    except (NodeDaemonUnavailable, RuntimeError):
+        kicked = False
+    return {
+        "status": "queued",
+        "via": "peer_outbox",
+        "outbox_id": (item or {}).get("id"),
+        "envelope_id": envelope["envelope_id"],
+        "to_node": message["origin_node"],
+        "kicked": kicked,
+    }
+
+
 def queue_and_attempt_reply_notification(
     store,
     message,
@@ -927,6 +1218,9 @@ def queue_and_attempt_reply_notification(
 ):
     if not isinstance(reply_text, str) or not reply_text.strip():
         return {"status": "skipped", "reason": "empty_reply"}
+    origin_node = message.get("origin_node")
+    if origin_node and origin_node != local_node_id():
+        return forward_reply_to_origin_node(store, message, reply_text, label=label, now=now)
     item = enqueue_reply_notification(
         store,
         message,
@@ -1194,9 +1488,17 @@ def cmd_inbox(args):
     if args.format == "json":
         print(json.dumps(rows, ensure_ascii=False))
         return 0
-    if not rows:
+    peer_rows = []
+    if _remote_agents_available():
+        try:
+            peer_rows = state.list_peer_outbox(status=None if args.all else "pending", limit=args.limit)
+        except Exception:  # noqa: BLE001 - diagnostics must not fail on schema drift
+            peer_rows = []
+    if not rows and not peer_rows:
         print("No queued relay notifications.")
         return 0
+    if rows:
+        print("Local reply notifications:")
     for item in rows:
         preview = " ".join((item.get("content") or "").split())
         if len(preview) > 120:
@@ -1214,6 +1516,24 @@ def cmd_inbox(args):
             )
         )
         print("  %s" % preview)
+    if peer_rows:
+        print("Cross-node envelopes:")
+        peers = {p["node_id"]: p["name"] for p in state.list_peers()}
+        for item in peer_rows:
+            payload = (item.get("envelope") or {}).get("payload") or {}
+            print(
+                "%s id=%s kind=%s to=%s request_id=%s attempts=%s via=%s error=%s"
+                % (
+                    item["status"],
+                    item["id"],
+                    item["kind"],
+                    peers.get(item["to_node"], item["to_node"]),
+                    payload.get("request_id") or "-",
+                    item["attempts"],
+                    item.get("via") or "-",
+                    item.get("last_error") or "-",
+                )
+            )
     return 0
 
 
@@ -1269,7 +1589,31 @@ def cmd_list(args):
             "webhook_port": agent["binding"].get("webhook_port", 0),
             "session_key": agent["binding"].get("session_key", ""),
             "groups": ", ".join(agent_groups) if agent_groups else "-",
+            "node": "local",
         })
+
+    remote_rows = []
+    if _remote_agents_available():
+        for item in _load_remote_agents():
+            entry = _remote_entry(item)
+            if filter_group and filter_group not in entry["groups"]:
+                continue
+            remote_rows.append({
+                "name": entry["name"],
+                "type": entry["type"],
+                "provider": entry["provider"],
+                "work_dir": entry["work_dir"],
+                "webhook_port": 0,
+                "session_key": "",
+                "groups": ", ".join(entry["groups"]) if entry["groups"] else "-",
+                "node": entry["node_name"],
+                "node_id": entry["node_id"],
+                "address": remote_agent_label(entry),
+                "online": entry["online"],
+                "health": entry["health"],
+                "path": entry["node_path"],
+            })
+    agents.extend(remote_rows)
 
     if args.format == "json":
         print(json.dumps(agents, indent=2, ensure_ascii=False))
@@ -1284,11 +1628,24 @@ def cmd_list(args):
         "─" * 16, "─" * 12, "─" * 12, "─" * 10, "─" * 10, "─" * 28
     ))
     for item in agents:
+        if item.get("node") not in (None, "local"):
+            continue
         webhook = ":%s" % item["webhook_port"] if item["webhook_port"] else "none"
         session_key = item["session_key"] or "none"
         print("  {0:<16} {1:<12} {2:<12} {3:<10} {4:<10} {5}".format(
             item["name"], item["type"], item["provider"], item["groups"], webhook, session_key
         ))
+    if remote_rows:
+        print("")
+        print("Remote agents (%d, address them as name@node):" % len(remote_rows))
+        print("")
+        print("  {0:<28} {1:<12} {2:<10} {3:<8} {4:<8} {5}".format("Address", "Type", "Group", "Node", "Path", "Health"))
+        print("  {0:<28} {1:<12} {2:<10} {3:<8} {4:<8} {5}".format("─" * 28, "─" * 12, "─" * 10, "─" * 8, "─" * 8, "─" * 10))
+        for item in remote_rows:
+            print("  {0:<28} {1:<12} {2:<10} {3:<8} {4:<8} {5}".format(
+                item["address"], item["type"], item["groups"],
+                "online" if item["online"] else "offline", item["path"] or "-", item["health"] or "-",
+            ))
 
 
 def cmd_info(args):
@@ -1299,6 +1656,17 @@ def cmd_info(args):
     except KeyError as e:
         print("Error: %s" % e)
         return 1
+    if agent.get("remote"):
+        print("  Agent:       %s" % remote_agent_label(agent))
+        print("  Type:        %s" % agent["type"])
+        print("  Provider:    %s (remote)" % agent["provider"])
+        print("  Node:        %s (%s)" % (agent["node_name"], agent["node_id"]))
+        print("  Groups:      %s" % (", ".join(agent["groups"]) or "-"))
+        print("  Work Dir:    %s" % agent["work_dir"])
+        print("  Status:      %s (%s)" % ("online" if agent["online"] else "offline", agent["health"] or "unknown"))
+        print("  Path:        %s" % (agent["node_path"] or "not probed yet"))
+        print("  Node Seen:   %s" % _format_time(agent["node_last_seen_at"] or None))
+        return 0
     status = format_status(agent)
 
     print("  Agent:       %s" % agent["name"])
@@ -1399,7 +1767,14 @@ def _routing_contract_lines(agent_name=None):
         "",
         "cc-connect relay and cc-relay-hub are different systems. Keep them separate.",
         "",
-        "Use cc-relay-hub for direct agent-to-agent work, especially when the user says:",
+        "Choose the conversation surface before choosing a command:",
+        "",
+        "- **Group-visible collaboration:** when the user says \"in the group\", \"here\", \"publicly\", asks multiple bots to discuss together, or otherwise wants everyone in the current bound chat to see the exchange, use `cc-connect relay send`. Do not use cc-relay-hub.",
+        "- **Private delegation:** when the user asks for a private/background handoff, or the result should return only to the requesting agent conversation, use cc-relay-hub.",
+        "- **Ambiguous direct request:** a plain \"ask Claude/Codex\" with no group-visible language defaults to private cc-relay-hub.",
+        "- The user's explicit visibility request always overrides the default.",
+        "",
+        "Use cc-relay-hub for private agent-to-agent work, especially when the user says:",
         "- \"send a message to codex\"",
         "- \"ask Claude/Codex\"",
         "- \"let another agent continue\"",
@@ -1416,6 +1791,7 @@ def _routing_contract_lines(agent_name=None):
         "```",
         "",
         "Private message reply policy:",
+        "- cc-relay-hub is private even when invoked from a group chat. In a named group, `send` is blocked by default; use `--private` only when the user explicitly asked for a private delegation.",
         "- Before sending, decide whether the message needs a reply.",
         "- If a reply is needed, use `send` without `--wait`; the target agent must answer with `[cc-relay reply_to=...]`, and the hook server forwards that reply back to the origin session.",
         "- If no reply is needed, use `send --no-reply`; the target must not answer only to acknowledge it.",
@@ -1423,14 +1799,42 @@ def _routing_contract_lines(agent_name=None):
         "- Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.",
         "",
         "For multiline or long messages, use `--stdin` or `--message-file`; do not pass a PowerShell multiline variable as the quoted positional MESSAGE on Windows.",
-        "Use cc-connect relay only for cc-connect's group-chat relay feature after a chat has been bound with /bind.",
+        "Use cc-connect relay for group-visible collaboration only after the current chat has been bound with /bind.",
         "Do not use `cc-connect relay send` for direct/private agent-to-agent delegation.",
         "Do not send messages across groups. Treat ungrouped agents as separate from named groups; exact agent names do not bypass group isolation.",
-        "If the user says \"send to codex\" or \"ask codex\", default to cc-relay-hub.",
+        "If the user says \"send to codex\" or \"ask codex\" without asking for a group-visible exchange, default to cc-relay-hub.",
         "If you receive `[cc-relay request_id=...]`, that message is addressed to you. Never answer `NO_REPLY` or an empty response.",
         "Even if the task says \"only reply X\", put `X` after the required `[cc-relay reply_to=...]` marker.",
         "",
+    ] + _cross_node_contract_lines()
+
+
+def _cross_node_contract_lines():
+    cmd = _hub_command()
+    return [
+        "Cross-node (other computers):",
+        "- Agents on other computers appear in `%s list` under \"Remote agents\" and are addressed as `name@node` (for example `codex-bot@office`)." % cmd,
+        "- A bare name resolves on this computer first; it falls back to remote nodes only when no local agent matches. When several nodes have the same agent name, use the full `name@node`.",
+        "- `send name@node` works exactly like a local send: the reply comes back to this conversation. If the node is offline, send prints `queued` and the daemon delivers when it returns.",
+        "- Requests from other computers arrive with an `Origin:` line naming the sender node; treat them like any other cc-relay request and reply with the marker.",
+        "- `%s node status` shows peers and paths; `%s node invite` prints the join string a new computer needs." % (cmd, cmd),
+        "",
     ]
+
+
+def _remote_peer_lines():
+    if not _remote_agents_available():
+        return []
+    try:
+        items = _load_remote_agents()
+    except Exception:
+        return []
+    lines = []
+    for item in items:
+        entry = _remote_entry(item)
+        group_str = " [%s]" % ",".join(entry["groups"]) if entry["groups"] else ""
+        lines.append("  %-24s %s%s  (remote)" % (remote_agent_label(entry), entry["type"], group_str))
+    return lines
 
 
 def _generate_agents_md(registry, bindings, agent_name):
@@ -1459,6 +1863,7 @@ def _generate_agents_md(registry, bindings, agent_name):
         a_groups = get_agent_groups(registry, name)
         group_str = " [%s]" % ",".join(a_groups) if a_groups else ""
         lines.append("  %-16s %s%s" % (name, a.get("type", "?"), group_str))
+    lines.extend(_remote_peer_lines())
     lines.append("```\n")
 
     lines.extend(_routing_contract_lines(agent_name))
@@ -1509,6 +1914,8 @@ def _generate_claude_md(registry, bindings, agent_name):
         a = registry["agents"][name]
         provider = a.get("provider", "?")
         lines.append("- **%s** (%s, provider=%s)" % (name, a.get("type", "?"), provider))
+    for line in _remote_peer_lines():
+        lines.append("- **%s** (%s)" % (line.split()[0], " ".join(line.split()[1:])))
 
     cdp_agents = [
         name for name, info in sorted(registry.get("agents", {}).items())
@@ -1747,7 +2154,13 @@ def _context_target_records(registry, bindings, scope, project_filter=None):
         by_path = {}
         for agent_name in selected:
             agent = agents.get(agent_name, {})
-            filename, _ = _agent_memory_spec(agent.get("type", ""))
+            filename, global_path = _agent_memory_spec(agent.get("type", ""))
+            # With the default "all" scope, an agent whose CLI already loads a global
+            # memory file gets the context there. Writing the same block into every
+            # work dir as well makes the CLI load it two or three times per session.
+            # An explicit --scope workdirs still writes project files.
+            if scope == "all" and global_path:
+                continue
             for work_dir in _cc_connect_project_dirs(registry, bindings, agent_name):
                 path = Path(work_dir) / filename
                 by_path.setdefault(str(path), {"path": path, "agents": []})["agents"].append(agent_name)
@@ -1830,6 +2243,152 @@ def cmd_bootstrap_context(args):
     return 0
 
 
+def deliver_to_local_agent(
+    agent,
+    message_body,
+    expect_reply=True,
+    timeout=300,
+    origin_project=None,
+    origin_session=None,
+    request_id=None,
+    state=None,
+    origin_node=None,
+    envelope_id=None,
+    created_at=None,
+):
+    """Deliver a message to an agent on this machine (webhook or CDP).
+
+    Shared by the CLI (`send`) and the node daemon (inbound cross-node requests).
+    Returns a dict with status delivered|failed|busy, request_id, session_key,
+    delivered_at, created_at and error (user-facing text, already prefixed).
+    """
+    provider = get_provider(agent)
+    state = state or StateStore(str(STATE_DB_PATH))
+    session_key = agent["binding"].get("session_key", "")
+    if agent["provider"] != "cdp" and not session_key:
+        return {
+            "status": "failed",
+            "request_id": request_id,
+            "session_key": "",
+            "error": "Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"],
+        }
+    effective_session = session_key or "cdp:%s" % agent["name"]
+    request_id = request_id or uuid.uuid4().hex
+    now = time.time() if created_at is None else created_at
+    envelope = RelayEnvelope(
+        request_id=request_id,
+        sender="cc-relay",
+        target=agent["name"],
+        body=message_body,
+        created_at=now,
+        reply_to=None,
+        ttl=int(timeout),
+        expect_reply=expect_reply,
+    )
+    base = {"request_id": request_id, "session_key": effective_session, "created_at": now}
+    is_control = message_body.startswith("/") and provider.supports_control()
+
+    if not expect_reply:
+        if is_control:
+            result = provider.execute_command(message_body)
+            if result.status != "delivered":
+                return dict(base, status="failed", error="Error: %s" % (result.error or "command failed"))
+            delivered_at = result.executed_at
+        else:
+            receipt = provider.deliver(envelope)
+            if receipt.status != "delivered":
+                return dict(base, status="failed", error="Error: %s" % (receipt.error or "delivery failed"))
+            delivered_at = receipt.delivered_at
+        return dict(base, status="delivered", delivered_at=delivered_at)
+
+    state.insert_message(
+        request_id=request_id,
+        sender=envelope.sender,
+        target=envelope.target,
+        session_key=effective_session,
+        provider=agent["provider"],
+        body=envelope.body,
+        status="pending",
+        created_at=now,
+        origin_project=origin_project,
+        origin_session_key=origin_session,
+        direction="inbound" if origin_node else "local",
+        origin_node=origin_node,
+        envelope_id=envelope_id,
+    )
+
+    locked = state.acquire_session_lock(effective_session, request_id, int(timeout))
+    if not locked:
+        state.mark_failed(request_id, "busy")
+        return dict(base, status="busy", error="busy: session %s already has a pending request" % effective_session)
+
+    if is_control:
+        result = provider.execute_command(message_body)
+        if result.status != "delivered":
+            state.mark_failed(request_id, result.error or "command failed")
+            state.release_session_lock(effective_session, request_id)
+            return dict(base, status="failed", error="Error: %s" % (result.error or "command failed"))
+        state.mark_delivered(request_id, result.executed_at)
+        return dict(base, status="delivered", delivered_at=result.executed_at)
+
+    receipt = provider.deliver(envelope)
+    if receipt.status != "delivered":
+        state.mark_failed(request_id, receipt.error or "delivery failed")
+        state.release_session_lock(effective_session, request_id)
+        return dict(base, status="failed", error="Error: %s" % (receipt.error or "delivery failed"))
+    state.mark_delivered(request_id, receipt.delivered_at)
+    return dict(base, status="delivered", delivered_at=receipt.delivered_at)
+
+
+def _send_to_remote_agent(args, agent, message_body, expect_reply, origin_project, origin_session, sender):
+    label = remote_agent_label(agent)
+    payload = {
+        "agent": agent["name"],
+        "node_id": agent["node_id"],
+        "body": message_body,
+        "expect_reply": expect_reply,
+        "timeout": int(args.timeout),
+        "origin_project": origin_project,
+        "origin_session": origin_session,
+        "sender": sender or "",
+        "wait_secs": 20.0,
+    }
+    try:
+        result = node_api("POST", "/api/v1/send", payload, timeout=60.0)
+    except (NodeDaemonUnavailable, RuntimeError) as exc:
+        print("Error: %s" % exc)
+        return 1
+    status = result.get("status")
+    request_id = result.get("request_id") or ""
+    via = result.get("via") or "pending"
+    if status == "delivered":
+        if expect_reply:
+            print("Message sent to %s (request_id=%s body_chars=%d via=%s)" % (label, request_id, len(message_body), via))
+        else:
+            print("Message sent to %s (notice_id=%s body_chars=%d no_reply=true via=%s)" % (label, request_id, len(message_body), via))
+    elif status == "queued":
+        if getattr(args, "no_queue", False):
+            print("Error: %s is not reachable right now (request_id=%s): %s" % (label, request_id, result.get("error") or "peer offline"))
+            return 1
+        print("queued: %s is not reachable right now (request_id=%s); the node daemon keeps retrying and the reply will arrive here when the peer is back." % (label, request_id))
+        return 0
+    else:
+        print(result.get("error") or ("Error: delivery to %s failed" % label))
+        return 1
+    if not args.wait or not expect_reply:
+        return 0
+    try:
+        waited = node_api("GET", "/api/v1/messages/%s/wait?timeout=%d" % (request_id, int(args.timeout)), timeout=int(args.timeout) + 15)
+    except (NodeDaemonUnavailable, RuntimeError) as exc:
+        print("Error: %s" % exc)
+        return 1
+    if waited.get("status") == "replied":
+        print(waited.get("reply_body") or "")
+        return 0
+    print("timeout: no reply observed before deadline")
+    return 1
+
+
 def cmd_send(args):
     try:
         message_body = _resolve_message_input(args)
@@ -1845,6 +2404,25 @@ def cmd_send(args):
     origin_project, origin_session = resolve_origin_context(args)
     sender = origin_project or os.environ.get("CC_PROJECT") or ""
     filter_group = getattr(args, "group", None)
+    group_chat_name = origin_group_chat_name(
+        bindings,
+        origin_project,
+        origin_session,
+    )
+    if group_chat_name and not getattr(args, "private", False):
+        print(
+            "Error: cc-relay-hub is a private agent-to-agent channel, but the "
+            "origin is named group chat '%s'." % group_chat_name
+        )
+        print(
+            "For a group-visible discussion use: "
+            "cc-connect relay send --to <agent> \"message\""
+        )
+        print(
+            "If the user explicitly requested a private delegation from this "
+            "group, rerun cc-relay-hub send with --private."
+        )
+        return 1
 
     # Resolve agent with same-group preference; --group participates in disambiguation
     try:
@@ -1855,12 +2433,17 @@ def cmd_send(args):
 
     # Validate resolved agent is in the specified group (catches exact-match bypass)
     if filter_group:
-        try:
-            members = get_group_members(registry, filter_group)
-        except KeyError:
-            print("Error: unknown group '%s'" % filter_group)
-            return 1
-        if agent["name"] not in members:
+        if agent.get("remote"):
+            members = []
+            in_group = filter_group in (agent.get("groups") or [])
+        else:
+            try:
+                members = get_group_members(registry, filter_group)
+            except KeyError:
+                print("Error: unknown group '%s'" % filter_group)
+                return 1
+            in_group = agent["name"] in members
+        if not in_group:
             print("Error: agent '%s' is not in group '%s'. Members: %s" % (
                 agent["name"], filter_group, ", ".join(members)))
             return 1
@@ -1868,105 +2451,51 @@ def cmd_send(args):
     # Group isolation: reject sends across group boundaries. Ungrouped agents
     # can talk to other ungrouped agents, but not to named groups.
     if sender and not filter_group:
-        if not check_group_compatibility(registry, sender, agent["name"]):
+        if not check_group_compatibility_entry(registry, sender, agent):
             sender_g = get_agent_groups(registry, sender)
-            target_g = get_agent_groups(registry, agent["name"])
+            target_g = get_agent_groups_entry(registry, agent)
+            target_label = remote_agent_label(agent) if agent.get("remote") else agent["name"]
             print("Error: cross-group send blocked (%s in [%s] -> %s in [%s])" % (
-                sender, ", ".join(sender_g), agent["name"], ", ".join(target_g)))
+                sender, ", ".join(sender_g), target_label, ", ".join(target_g)))
             return 1
 
-    provider = get_provider(agent)
-    state = StateStore(str(STATE_DB_PATH))
-    session_key = agent["binding"].get("session_key", "")
-
-    if agent["provider"] != "cdp" and not session_key:
-        print("Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"])
-        return 1
-
-    effective_session = session_key or "cdp:%s" % agent["name"]
-    request_id = uuid.uuid4().hex
-    now = time.time()
     expect_reply = not getattr(args, "no_reply", False)
-    envelope = RelayEnvelope(
-        request_id=request_id,
-        sender="cc-relay",
-        target=agent["name"],
-        body=message_body,
-        created_at=now,
-        reply_to=None,
-        ttl=int(args.timeout),
+    if agent.get("remote"):
+        return _send_to_remote_agent(args, agent, message_body, expect_reply, origin_project, origin_session, sender)
+
+    result = deliver_to_local_agent(
+        agent,
+        message_body,
         expect_reply=expect_reply,
+        timeout=int(args.timeout),
+        origin_project=origin_project,
+        origin_session=origin_session,
     )
+    if result["status"] != "delivered":
+        print(result["error"])
+        return 1
+    request_id = result["request_id"]
+    effective_session = result["session_key"]
     if not expect_reply:
-        is_control = message_body.startswith("/") and provider.supports_control()
-        if is_control:
-            result = provider.execute_command(message_body)
-            if result.status != "delivered":
-                print("Error: %s" % (result.error or "command failed"))
-                return 1
-            delivered_at = result.executed_at
-        else:
-            receipt = provider.deliver(envelope)
-            if receipt.status != "delivered":
-                print("Error: %s" % (receipt.error or "delivery failed"))
-                return 1
-            delivered_at = receipt.delivered_at
         print("Message sent to %s (notice_id=%s body_chars=%d no_reply=true delivered_at=%.3f)" % (
             agent["name"],
             request_id,
-            len(envelope.body),
-            delivered_at,
+            len(message_body),
+            result["delivered_at"],
         ))
         return 0
-
-    state.insert_message(
-        request_id=request_id,
-        sender=envelope.sender,
-        target=envelope.target,
-        session_key=effective_session,
-        provider=agent["provider"],
-        body=envelope.body,
-        status="pending",
-        created_at=now,
-        origin_project=origin_project,
-        origin_session_key=origin_session,
-    )
-
-    locked = state.acquire_session_lock(effective_session, request_id, args.timeout)
-    if not locked:
-        state.mark_failed(request_id, "busy")
-        print("busy: session %s already has a pending request" % effective_session)
-        return 1
-
-    is_control = message_body.startswith("/") and provider.supports_control()
-    if is_control:
-        result = provider.execute_command(message_body)
-        if result.status != "delivered":
-            state.mark_failed(request_id, result.error or "command failed")
-            state.release_session_lock(effective_session, request_id)
-            print("Error: %s" % (result.error or "command failed"))
-            return 1
-        state.mark_delivered(request_id, result.executed_at)
-    else:
-        receipt = provider.deliver(envelope)
-        if receipt.status != "delivered":
-            state.mark_failed(request_id, receipt.error or "delivery failed")
-            state.release_session_lock(effective_session, request_id)
-            print("Error: %s" % (receipt.error or "delivery failed"))
-            return 1
-        state.mark_delivered(request_id, receipt.delivered_at)
 
     if not args.wait:
         print("Message sent to %s (request_id=%s body_chars=%d)" % (
             agent["name"],
             request_id,
-            len(envelope.body),
+            len(message_body),
         ))
         return 0
 
     reply = wait_for_reply_framework(
-        store=state,
-        provider=provider,
+        store=StateStore(str(STATE_DB_PATH)),
+        provider=get_provider(agent),
         request_id=request_id,
         session_key=effective_session,
         timeout_secs=args.timeout,
@@ -2394,7 +2923,7 @@ def cmd_cdp(args):
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     if not args.command:
-        print("Usage: cc-relay <list|send|info|groups|relay|cdp> ...")
+        print("Usage: cc-relay <list|send|info|groups|relay|node|peer|cdp> ...")
         return 1
     if args.command == "list":
         cmd_list(args)
@@ -2424,6 +2953,9 @@ def main(argv=None):
         return cmd_relay(args)
     if args.command == "cdp":
         return cmd_cdp(args)
+    if args.command in ("node", "peer"):
+        from core.node_cmds import run_node_command
+        return run_node_command(args)
     return 1
 
 

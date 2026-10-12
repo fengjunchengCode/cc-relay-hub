@@ -26,6 +26,12 @@ class MessageInputTest(unittest.TestCase):
         self.assertFalse(args.wait)
         self.assertEqual(hub._resolve_message_input(args), "hello")
 
+    def test_private_flag_is_available_for_named_group_override(self):
+        args = hub.parse_args(["send", "claude-bot", "hello", "--private"])
+
+        self.assertTrue(args.private)
+        self.assertEqual(hub._resolve_message_input(args), "hello")
+
     def test_stdin_preserves_multiline_message(self):
         args = hub.parse_args(["send", "claude-bot", "--stdin"])
 

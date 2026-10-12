@@ -15,7 +15,9 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 - Use one target session at a time. Phase 1a enforces a single pending outbound write per target session.
 - When the user says they added a new cc-connect instance or changed work directories with cc-connect `/dir`, run `cc-relay-hub bootstrap` to re-scan, verify connectivity, and refresh global/workdir agent context blocks.
 - When you receive `[cc-relay request_id=...]`, always reply with `[cc-relay reply_to=...]`; never answer `NO_REPLY` or omit the marker because the task says "only reply X".
+- Select the conversation surface before selecting a tool. Explicit requests such as "in the group", "here", "publicly", or "let both bots discuss" require the bound group-chat relay, not cc-relay-hub.
 - Before sending a private message, decide whether a reply is needed. Use plain `send` for requests that need a result, and `send --no-reply` for notifications or acknowledgements.
+- When a private hub send is intentionally initiated from a named group chat, pass `--private`; the CLI blocks accidental private routing from named groups without that acknowledgement.
 - Do not open listeners, run `watch`, run `watch --loop`, use shell polling, raw long-poll HTTP, or use `send --wait` to wait for a private-message reply unless the user explicitly asks for a synchronous diagnostic wait.
 - Replies to a busy origin session are persisted without probing its webhook, then retried once after its next final turn. Use `cc-relay-hub inbox` only for diagnostics; do not poll it.
 - Do not send a new relay message merely to answer a relay reply; avoid reply-to-reply loops unless the user explicitly requests another round.
@@ -24,10 +26,11 @@ You are operating in a multi-agent network on the current machine. Use `cc-relay
 
 `cc-connect relay` and `cc-relay-hub` are different systems:
 
-- Use `cc-relay-hub` for direct/private agent-to-agent delegation: "send to codex", "ask Claude", "let another agent continue", or "relay to <agent>".
-- Use `cc-connect relay` only for cc-connect's group-chat relay feature after a chat has been bound with `/bind`.
+- Use `cc-connect relay` for group-visible collaboration after the current chat has been bound with `/bind`. This includes explicit requests to discuss "in the group", "here", "publicly", or to let multiple bots talk where the user can see the exchange.
+- Use `cc-relay-hub` for direct/private agent-to-agent delegation: private/background work, a quiet handoff, or a result intended to return only to the requesting agent conversation.
 - Do not use `cc-connect relay send` as the default implementation for "send a message to codex".
-- If the user asks to contact another coding agent by name or type, default to `cc-relay-hub`.
+- If the user asks to contact another coding agent by name or type without specifying visibility, default to `cc-relay-hub`.
+- The user's explicit visibility request always overrides that default.
 
 ## Agent Resolution
 

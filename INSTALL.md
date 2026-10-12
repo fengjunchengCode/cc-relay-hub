@@ -654,3 +654,40 @@ rm -f ~/Library/LaunchAgents/com.cc-relay-hub.hook.plist
 rm -f ~/bin/cc-relay-hub
 rm -rf ~/.cc-connect/cc-relay-hub
 ```
+
+## Cross-node: connect agents on other computers
+
+Run on every computer that should take part (idempotent, creates the login service):
+
+```bash
+cc-relay-hub node install
+cc-relay-hub node status
+```
+
+On the first computer, print the join string:
+
+```bash
+cc-relay-hub node invite
+```
+
+On each additional computer, join with that string (paste it to the agent in
+chat; it runs the command):
+
+```bash
+cc-relay-hub node join "ccrelay://join/..."
+cc-relay-hub node status        # peers appear within ~60 s
+cc-relay-hub list               # remote agents listed as name@node
+```
+
+Verify the round trip from either side:
+
+```bash
+cc-relay-hub send <agent>@<node> "reply with the word pong"
+```
+
+The reply arrives in the sending conversation through the normal reply path.
+If anything fails, `cc-relay-hub node doctor` names the failing check and the fix.
+No ports need to be opened and no VPN is required: computers on different
+networks talk through the encrypted rendezvous relay (public ntfy.sh by
+default, or a self-hosted `relay_server.py`), and upgrade to a direct path on
+the same LAN automatically. Details: `docs/federation.md`.

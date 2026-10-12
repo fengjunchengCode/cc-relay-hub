@@ -37,6 +37,7 @@ cc-relay-hub adds that private agent-to-agent handoff. Agents can discover peers
 - 🧭 **Let agents find the right teammate** — `cc-relay-hub list` shows live peers, while generated project instructions teach new agents how to use them.
 - 🧩 **Bridge CLI agents and IDE agents** — Use cc-connect-backed agents for Claude Code and Codex, and CDP-backed agents for Electron IDEs such as Antigravity.
 - ⏳ **Close replies without blocking** — plain `send` returns immediately while the hook server forwards marked replies back to the origin chat.
+- 🌐 **Reach agents on other computers** — `cc-relay-hub node install` on each machine, one `node join` string, then `send codex-bot@office "task"`. Encrypted end to end, works across networks without VPN or port forwarding. See [docs/federation.md](./docs/federation.md).
 - 📥 **Do not lose replies to busy sessions** — replies wait in a durable
   outbox. The hub checks persisted turn state before POSTing and retries once
   after the origin agent finishes its current turn.
@@ -110,6 +111,12 @@ cc-relay-hub watch
 ```
 
 Private agent-to-agent messages are asynchronous by default: send the task, then let the target's marked reply be forwarded by the hook server. Do not open listeners or use `--wait` from an agent conversation unless a human explicitly asks for a synchronous diagnostic wait.
+
+Channel selection is explicit: use `cc-connect relay send` for a discussion the
+user wants visible in a bound group chat, and use `cc-relay-hub send` for a
+private handoff. From a named group chat, hub `send` requires `--private` so an
+agent cannot silently move a requested public discussion into the private
+channel.
 
 ## 💬 Typical workflows
 

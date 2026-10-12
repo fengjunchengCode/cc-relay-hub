@@ -682,6 +682,8 @@ class BootstrapContextTest(unittest.TestCase):
                 self.assertEqual(content.count("## Message Routing Contract"), 1)
                 self.assertIn("Do not use `cc-connect relay send`", content)
                 self.assertIn("Do not send messages across groups", content)
+                self.assertIn("Group-visible collaboration", content)
+                self.assertIn("explicit visibility request always overrides", content)
             finally:
                 os.chdir(str(old_cwd))
                 hub.REGISTRY_PATH = old_reg
@@ -704,6 +706,8 @@ class BootstrapContextTest(unittest.TestCase):
         self.assertIn("send <agent> \"status update\" --no-reply", content)
         self.assertIn("Do not use `cc-relay-hub watch`, `watch --loop`, shell polling, or `send --wait`", content)
         self.assertIn("avoid reply-to-reply loops", content)
+        self.assertIn("cc-relay-hub is private even when invoked from a group chat", content)
+        self.assertIn("use `--private` only when the user explicitly asked", content)
 
     def test_generated_claude_context_explains_cdp_targets(self):
         registry = {

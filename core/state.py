@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 
@@ -99,6 +100,76 @@ class StateStore(object):
                     )
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS peers (
+                        node_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        addrs TEXT NOT NULL DEFAULT '[]',
+                        best_addr TEXT,
+                        path TEXT,
+                        rtt_ms REAL,
+                        snapshot_version INTEGER NOT NULL DEFAULT 0,
+                        added_at REAL NOT NULL,
+                        last_seen_at REAL,
+                        last_probe_at REAL,
+                        last_direct_ok_at REAL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_agents (
+                        node_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        type TEXT,
+                        provider TEXT,
+                        groups TEXT NOT NULL DEFAULT '[]',
+                        work_dir TEXT,
+                        has_session INTEGER NOT NULL DEFAULT 0,
+                        health TEXT,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (node_id, name)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS peer_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        envelope_id TEXT NOT NULL UNIQUE,
+                        to_node TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        envelope TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        next_attempt_at REAL NOT NULL,
+                        expires_at REAL,
+                        last_attempt_at REAL,
+                        delivered_at REAL,
+                        last_error TEXT,
+                        via TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS peer_outbox_pending_idx
+                    ON peer_outbox (status, next_attempt_at, to_node, id)
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS peer_inbox_seen (
+                        envelope_id TEXT PRIMARY KEY,
+                        kind TEXT,
+                        from_node TEXT,
+                        received_at REAL NOT NULL,
+                        result TEXT
+                    )
+                    """
+                )
                 self._ensure_message_columns(conn)
                 self._ensure_notification_columns(conn)
         finally:
@@ -114,6 +185,10 @@ class StateStore(object):
             "origin_session_key": "TEXT",
             "notified_at": "REAL",
             "notify_error": "TEXT",
+            "direction": "TEXT",
+            "origin_node": "TEXT",
+            "target_node": "TEXT",
+            "envelope_id": "TEXT",
         }
         for name, column_type in additions.items():
             if name in columns:
@@ -150,6 +225,10 @@ class StateStore(object):
         created_at,
         origin_project=None,
         origin_session_key=None,
+        direction=None,
+        origin_node=None,
+        target_node=None,
+        envelope_id=None,
     ):
         conn = self._connect()
         try:
@@ -158,8 +237,9 @@ class StateStore(object):
                     """
                     INSERT OR REPLACE INTO messages (
                         request_id, sender, target, session_key, provider, body, status,
-                        origin_project, origin_session_key, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        origin_project, origin_session_key, created_at,
+                        direction, origin_node, target_node, envelope_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         _sanitize_text(request_id),
@@ -172,6 +252,10 @@ class StateStore(object):
                         _sanitize_text(origin_project),
                         _sanitize_text(origin_session_key),
                         created_at,
+                        _sanitize_text(direction),
+                        _sanitize_text(origin_node),
+                        _sanitize_text(target_node),
+                        _sanitize_text(envelope_id),
                     ),
                 )
         finally:
@@ -588,5 +672,378 @@ class StateStore(object):
                         "DELETE FROM session_locks WHERE session_key = ? AND request_id = ?",
                         (session_key, request_id),
                     )
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Cross-node: peers, remote agents, peer outbox, inbound dedupe
+    # ------------------------------------------------------------------
+    def upsert_peer(self, node_id, name=None, addrs=None, now=None, snapshot_version=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                row = conn.execute("SELECT * FROM peers WHERE node_id = ?", (node_id,)).fetchone()
+                if row is None:
+                    conn.execute(
+                        """
+                        INSERT INTO peers (node_id, name, addrs, snapshot_version, added_at, last_seen_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            node_id,
+                            name or node_id,
+                            json.dumps(addrs or []),
+                            int(snapshot_version or 0),
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    merged_addrs = json.loads(row["addrs"] or "[]")
+                    if addrs is not None:
+                        merged_addrs = list(addrs)
+                    conn.execute(
+                        """
+                        UPDATE peers SET name = ?, addrs = ?, last_seen_at = ?,
+                            snapshot_version = MAX(snapshot_version, ?)
+                        WHERE node_id = ?
+                        """,
+                        (
+                            name or row["name"],
+                            json.dumps(merged_addrs),
+                            now,
+                            int(snapshot_version or 0),
+                            node_id,
+                        ),
+                    )
+                row = conn.execute("SELECT * FROM peers WHERE node_id = ?", (node_id,)).fetchone()
+                return self._peer_row(row)
+        finally:
+            conn.close()
+
+    def add_peer_addr(self, node_id, addr, name=None, now=None):
+        peer = self.get_peer(node_id)
+        addrs = list(peer["addrs"]) if peer else []
+        if addr not in addrs:
+            addrs.insert(0, addr)
+        return self.upsert_peer(node_id, name=name or (peer or {}).get("name"), addrs=addrs, now=now)
+
+    def set_peer_probe(self, node_id, best_addr, path, rtt_ms, ok, now=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                if ok:
+                    conn.execute(
+                        """
+                        UPDATE peers SET best_addr = ?, path = ?, rtt_ms = ?, last_probe_at = ?,
+                            last_direct_ok_at = ?
+                        WHERE node_id = ?
+                        """,
+                        (best_addr, path, rtt_ms, now, now, node_id),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        UPDATE peers SET best_addr = NULL, path = ?, rtt_ms = NULL, last_probe_at = ?
+                        WHERE node_id = ?
+                        """,
+                        (path, now, node_id),
+                    )
+        finally:
+            conn.close()
+
+    def _peer_row(self, row):
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["addrs"] = json.loads(item.get("addrs") or "[]")
+        except ValueError:
+            item["addrs"] = []
+        return item
+
+    def get_peer(self, node_id):
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM peers WHERE node_id = ?", (node_id,)).fetchone()
+            return self._peer_row(row)
+        finally:
+            conn.close()
+
+    def find_peer_by_name(self, name):
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT * FROM peers").fetchall()
+            peers = [self._peer_row(row) for row in rows]
+        finally:
+            conn.close()
+        exact = [p for p in peers if p["name"] == name or p["node_id"] == name]
+        if exact:
+            return exact[0]
+        prefix = [p for p in peers if p["node_id"].startswith(name) or p["node_id"].startswith("n_" + name)]
+        if len(prefix) == 1:
+            return prefix[0]
+        return None
+
+    def list_peers(self):
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT * FROM peers ORDER BY name, node_id").fetchall()
+            return [self._peer_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    def remove_peer(self, node_id):
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM peers WHERE node_id = ?", (node_id,))
+                conn.execute("DELETE FROM remote_agents WHERE node_id = ?", (node_id,))
+        finally:
+            conn.close()
+
+    def replace_remote_agents(self, node_id, agents, now=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM remote_agents WHERE node_id = ?", (node_id,))
+                for agent in agents or []:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO remote_agents (
+                            node_id, name, type, provider, groups, work_dir, has_session, health, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            node_id,
+                            _sanitize_text(agent.get("name")),
+                            _sanitize_text(agent.get("type")),
+                            _sanitize_text(agent.get("provider")),
+                            json.dumps(agent.get("groups") or []),
+                            _sanitize_text(agent.get("work_dir")),
+                            1 if agent.get("has_session") else 0,
+                            _sanitize_text(agent.get("health")),
+                            now,
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def list_remote_agents(self, node_id=None):
+        conn = self._connect()
+        try:
+            if node_id:
+                rows = conn.execute(
+                    """
+                    SELECT ra.*, p.name AS node_name, p.last_seen_at AS node_last_seen_at, p.path AS node_path
+                    FROM remote_agents ra LEFT JOIN peers p ON p.node_id = ra.node_id
+                    WHERE ra.node_id = ? ORDER BY ra.name
+                    """,
+                    (node_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT ra.*, p.name AS node_name, p.last_seen_at AS node_last_seen_at, p.path AS node_path
+                    FROM remote_agents ra LEFT JOIN peers p ON p.node_id = ra.node_id
+                    ORDER BY p.name, ra.name
+                    """
+                ).fetchall()
+        finally:
+            conn.close()
+        items = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["groups"] = json.loads(item.get("groups") or "[]")
+            except ValueError:
+                item["groups"] = []
+            item["has_session"] = bool(item.get("has_session"))
+            items.append(item)
+        return items
+
+    def enqueue_peer_envelope(self, envelope, now=None, ttl_secs=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO peer_outbox (
+                        envelope_id, to_node, kind, envelope, status, attempts,
+                        created_at, next_attempt_at, expires_at
+                    ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                    """,
+                    (
+                        envelope["envelope_id"],
+                        envelope["to_node"],
+                        envelope["kind"],
+                        json.dumps(envelope, ensure_ascii=False),
+                        now,
+                        now,
+                        (now + float(ttl_secs)) if ttl_secs else None,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM peer_outbox WHERE envelope_id = ?", (envelope["envelope_id"],)
+                ).fetchone()
+                return self._outbox_row(row)
+        finally:
+            conn.close()
+
+    def _outbox_row(self, row):
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["envelope"] = json.loads(item["envelope"])
+        except (ValueError, TypeError):
+            item["envelope"] = None
+        return item
+
+    def claim_peer_outbox(self, to_node=None, due_at=None, limit=50):
+        conn = self._connect()
+        try:
+            with conn:
+                query = "SELECT * FROM peer_outbox WHERE status = 'pending'"
+                params = []
+                if to_node:
+                    query += " AND to_node = ?"
+                    params.append(to_node)
+                if due_at is not None:
+                    query += " AND next_attempt_at <= ?"
+                    params.append(due_at)
+                query += " ORDER BY id LIMIT ?"
+                params.append(int(limit))
+                rows = conn.execute(query, params).fetchall()
+                return [self._outbox_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    def get_peer_outbox(self, envelope_id):
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM peer_outbox WHERE envelope_id = ?", (envelope_id,)).fetchone()
+            return self._outbox_row(row)
+        finally:
+            conn.close()
+
+    def list_peer_outbox(self, status=None, limit=100):
+        conn = self._connect()
+        try:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM peer_outbox WHERE status = ? ORDER BY id DESC LIMIT ?", (status, int(limit))
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM peer_outbox ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+            return [self._outbox_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    def mark_peer_outbox_attempt(self, envelope_id, next_attempt_at, error=None, via=None, now=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE peer_outbox SET attempts = attempts + 1, last_attempt_at = ?,
+                        next_attempt_at = ?, last_error = ?, via = COALESCE(?, via)
+                    WHERE envelope_id = ? AND status = 'pending'
+                    """,
+                    (now, next_attempt_at, _sanitize_text(error), via, envelope_id),
+                )
+        finally:
+            conn.close()
+
+    def mark_peer_outbox_delivered(self, envelope_id, via=None, now=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE peer_outbox SET status = 'delivered', delivered_at = ?, last_error = NULL,
+                        via = COALESCE(?, via)
+                    WHERE envelope_id = ? AND status = 'pending'
+                    """,
+                    (now, via, envelope_id),
+                )
+                return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def mark_peer_outbox_status(self, envelope_id, status, error=None, now=None):
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE peer_outbox SET status = ?, last_error = ?, last_attempt_at = ?
+                    WHERE envelope_id = ?
+                    """,
+                    (status, _sanitize_text(error), now, envelope_id),
+                )
+        finally:
+            conn.close()
+
+    def record_inbound_envelope(self, envelope_id, kind=None, from_node=None, result=None, now=None):
+        """Return True when the envelope is new, False when already seen."""
+        now = time.time() if now is None else now
+        conn = self._connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO peer_inbox_seen (envelope_id, kind, from_node, received_at, result)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (envelope_id, kind, from_node, now, json.dumps(result) if result is not None else None),
+                )
+                return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def set_inbound_result(self, envelope_id, result):
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE peer_inbox_seen SET result = ? WHERE envelope_id = ?",
+                    (json.dumps(result) if result is not None else None, envelope_id),
+                )
+        finally:
+            conn.close()
+
+    def get_inbound_result(self, envelope_id):
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT result FROM peer_inbox_seen WHERE envelope_id = ?", (envelope_id,)).fetchone()
+        finally:
+            conn.close()
+        if not row or not row["result"]:
+            return None
+        try:
+            return json.loads(row["result"])
+        except ValueError:
+            return None
+
+    def list_messages_by_direction(self, direction, status=None, limit=100):
+        conn = self._connect()
+        try:
+            query = "SELECT * FROM messages WHERE direction = ?"
+            params = [direction]
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(int(limit))
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
         finally:
             conn.close()
