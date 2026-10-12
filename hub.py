@@ -2272,6 +2272,16 @@ def deliver_to_local_agent(
             "session_key": "",
             "error": "Error: agent %s has no session_key yet. Chat with the bot once first." % agent["name"],
         }
+    if agent["provider"] == "cc_connect" and not int(agent["binding"].get("webhook_port", 0) or 0):
+        return {
+            "status": "failed",
+            "request_id": request_id,
+            "session_key": session_key,
+            "error": (
+                "Error: agent %s has no webhook port in bindings.json (cc-connect config lacks a "
+                "[webhook] port for this project). Fix the config and run `cc-relay-hub bootstrap`."
+            ) % agent["name"],
+        }
     effective_session = session_key or "cdp:%s" % agent["name"]
     request_id = request_id or uuid.uuid4().hex
     now = time.time() if created_at is None else created_at

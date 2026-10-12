@@ -299,13 +299,18 @@ class NodeDaemon(object):
                 health = status.agent_status or status.provider_status or ""
             except Exception as exc:  # noqa: BLE001 - health is best effort
                 health = "unknown (%s)" % exc.__class__.__name__
+            binding = agent.get("binding") or {}
+            if agent.get("provider") == "cc_connect" and not int(binding.get("webhook_port", 0) or 0):
+                health = "no-webhook"
+            elif agent.get("provider") == "cc_connect" and not binding.get("session_key"):
+                health = "no-session"
             agents.append({
                 "name": name,
                 "type": agent.get("type"),
                 "provider": agent.get("provider"),
                 "work_dir": agent.get("work_dir"),
                 "groups": hub.get_agent_groups(registry, name),
-                "has_session": bool(agent["binding"].get("session_key")) or agent.get("provider") == "cdp",
+                "has_session": bool(binding.get("session_key")) or agent.get("provider") == "cdp",
                 "health": health,
             })
         return agents
@@ -540,14 +545,21 @@ class NodeDaemon(object):
 
     def publish_card(self):
         envelope = self.build_hello()
-        try:
-            for chunk in peer_protocol.to_chunks(envelope, self.keys.enc_key):
-                self.rendezvous.publish(self.keys.topic, chunk)
-            self.last_card_at = time.time()
-            self.last_card_error = None
-        except RendezvousError as exc:
-            self.last_card_error = str(exc)
-            self.log("address card publish failed: %s" % exc)
+        chunks = peer_protocol.to_chunks(envelope, self.keys.enc_key)
+        last_error = None
+        for attempt in range(3):
+            try:
+                for chunk in chunks:
+                    self.rendezvous.publish(self.keys.topic, chunk)
+                self.last_card_at = time.time()
+                self.last_card_error = None
+                return
+            except RendezvousError as exc:
+                # Public ntfy occasionally drops a TLS connection; retry before logging.
+                last_error = exc
+                self.stop_event.wait(2.0 * (attempt + 1))
+        self.last_card_error = str(last_error)
+        self.log("address card publish failed after retries: %s" % last_error)
 
     # ------------------------------------------------------------------
     # Direct HTTP transport
