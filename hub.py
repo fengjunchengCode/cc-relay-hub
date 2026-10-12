@@ -2525,9 +2525,11 @@ def _format_time(value):
 
 
 def cmd_on_hook(_args):
-    payload = json.load(sys.stdin)
+    # hook-server.mjs writes UTF-8 JSON bytes. Windows redirected stdin may
+    # default to GBK/surrogateescape, corrupting Chinese before it is queued.
+    payload = json.load(sys.stdin.buffer)
     result = handle_hook_event(payload)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=True))
     return 0
 
 
