@@ -1,5 +1,7 @@
 # Cross-node federation (other computers)
 
+<p align="center"><img src="./assets/cc-relay-hub-cross-node.svg" alt="Architecture: node daemons, rendezvous, direct and relay paths" width="920"></p>
+
 cc-relay-hub can route private agent-to-agent messages between computers. Each
 computer runs one **node daemon** (`cc-relay-hub node start`), and agents on
 other computers are addressed as `name@node`:

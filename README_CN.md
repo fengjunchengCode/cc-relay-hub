@@ -29,6 +29,31 @@ cc-relay-hub 补上的就是这层安静的 agent-to-agent 交接。agent 可以
   <strong>本地优先</strong> · <strong>agent agnostic</strong> · <strong>安静交接</strong> · <strong>自动闭环回信</strong>
 </p>
 
+## 🆕 重大更新：跨电脑的 agent 协作（cross-node federation）
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-cross-node-hero.png" alt="cc-relay-hub 跨机器：家里的笔记本和公司的台式机各自运行 Claude 和 Codex，通过局域网直连或加密中继相连" width="920">
+</p>
+
+你的 agent 不必再挤在一台机器上。每台电脑跑一个 **节点守护进程（消息中心）**，集群里任何机器上的 agent 都用 `name@node` 来称呼：
+
+```bash
+cc-relay-hub node install                 # 每台电脑执行一次
+cc-relay-hub node invite                  # 在已入群的电脑上执行，得到 ccrelay://join/...
+cc-relay-hub node join "ccrelay://join/…" # 在新电脑上执行（把这串发给它的 agent 就行）
+
+cc-relay-hub list                         # 远端 agent 显示为 codex-bot@office
+cc-relay-hub send codex-bot@office "按方案实现并跑完测试"
+```
+
+- 🔌 **零网络配置** — 不用 VPN、不开端口、不注册账号。机器之间通过集合点上的加密地址卡互相发现（默认公共 ntfy.sh，也可以用自带的 `relay_server.py` 自托管）。
+- 🛣️ **自动选最优路径** — 同一局域网走直连，毫秒级；任一方有可达地址也走直连；否则走加密中继。每分钟重新探测，自动升降级。
+- 🔐 **端到端加密** — 所有离开本机的信封都用集群密钥派生的密钥加密和签名。集合点只见密文，未签名的请求一律 `401`。
+- 🔁 **回信闭环不变** — 请求由目标电脑自己的守护进程投递进 agent 会话（含忙碌检查和投递确认），回复由发起电脑的守护进程注入回原会话。对方离线时 `send` 显示 `queued`，守护进程最长重试 48 小时。
+- 🧭 **agent 自己就会用** — 生成的 CLAUDE.md / AGENTS.md 会把远端 agent 列成 `name@node`；`cc-relay-hub node doctor` 会指出任何连通性问题和修法。
+
+详情见 [docs/federation.md](./docs/federation.md)。本机原有用法完全不变。
+
 ## ✨ Why cc-relay-hub?
 
 - 📱 <strong>手机上指挥 agent</strong> — 保留 cc-connect 的移动端入口，再让本地 agent 接着互相协作。
@@ -104,6 +129,8 @@ cc-relay-hub send <agent> "status update" --no-reply
 cc-relay-hub inbox
 cc-relay-hub relay <from-agent> <to-agent> "task"  # 仅用于同步诊断交接
 cc-relay-hub watch
+cc-relay-hub node install | status | invite | join <string> | doctor   # 跨电脑
+cc-relay-hub send <agent>@<node> "task"                                 # 发给另一台电脑上的 agent
 ```
 
 私信默认是异步的：发出任务后，目标 agent 带标记的回复会由 hook server 转回发起会话。如果发起会话还在思考，回复会保存在 outbox，Hub 不会定时反复撞 busy session；等该回合结束产生明确 idle edge 后只重投一次。`cc-relay-hub inbox` 可查看尚未确认送达的回复。除非用户明确要求同步诊断等待，否则 agent 会话里不要开启监听，也不要用 `--wait` 等回复。
@@ -154,6 +181,17 @@ cc-relay-hub send antigravity-ide "Open the project and inspect the failing work
 
 <!-- TODO: 截图/GIF：Hermes 通过 CDP 给 Antigravity 发送任务并收到回复。建议路径：docs/assets/demo-antigravity-cdp.gif -->
 
+### 4. 把任务交给另一台电脑上的 agent
+
+家里的笔记本上 Claude 负责规划，公司台式机上的 Codex 有完整代码库和测试环境：
+
+```bash
+cc-relay-hub list                                   # codex-bot@office  codex  [team]  online  lan
+cc-relay-hub send codex-bot@office "按 PLAN.md 实现，并跑完整测试"
+```
+
+公司机器的守护进程把任务送进 Codex 自己的会话，Codex 用 relay 标记作答，答案出现在笔记本上发起的那个对话里。台式机睡着了也没关系，请求留在 outbox，醒来就送。
+
 ## 🧩 支持矩阵
 
 | Agent / tool | 路径 | 状态 | 适合做什么 |
@@ -165,8 +203,8 @@ cc-relay-hub send antigravity-ide "Open the project and inspect the failing work
 | Antigravity | CDP | ✅ | 通过本地 Electron 窗口做 IDE automation |
 | Hermes | 本地调度者 | ✅ | 发现 peer、派发任务、收集回复 |
 | 其他 Electron IDE | CDP backend | ⚠️ | 需要能找到对应 IDE 的 chat UI |
-| Windows | local CLI | ⚠️ | 核心代码可移植，但当前顺滑路径主要在 macOS/Linux 验证。 |
-| 跨机器 relay | 自行配置网络 | ⚠️ | 默认同机运行；跨机器需要你自己处理网络和安全边界。 |
+| Windows | local CLI + 节点守护进程 | ✅ | 可作为集群成员运行（已验证：一台 Windows 台式机和一台 macOS 节点互发任务与回复）。 |
+| 其他电脑 | 节点守护进程（`name@node`） | ✅ | 加密的跨机器投递，自动在局域网直连 / 中继之间切换；见 [docs/federation.md](./docs/federation.md)。 |
 
 ## ❓ FAQ
 
@@ -194,14 +232,21 @@ CDP 可以控制 IDE 窗口。只把调试端口绑定在 localhost，不要暴�
 <details>
 <summary><strong>支持 Windows 吗？</strong></summary>
 
-项目基于 Python 和本地进程，设计上可移植；但当前主路径主要在 macOS/Linux 验证。Windows 先按 community-tested 看待。
+支持。CLI、hook server 和节点守护进程都能在 Windows（Python 3.9+）上运行，`cc-relay-hub node install` 会把守护进程注册为登录任务。已经验证过一台 Windows 台式机作为集群成员与 macOS 节点互发任务和回复。
 
 </details>
 
 <details>
 <summary><strong>能跨机器用吗？</strong></summary>
 
-默认是同一台机器内使用。跨机器需要你自己处理网络、鉴权和端口安全，不是默认推荐路径。
+能，节点守护进程就是为此而生。每台电脑执行 `cc-relay-hub node install`，用一个邀请串把它们连起来，然后用 `name@node` 称呼远端 agent。不需要 VPN 也不用开端口：不同网络的机器通过加密中继通信，能直连时自动切换到直连。见 [docs/federation.md](./docs/federation.md)。
+
+</details>
+
+<details>
+<summary><strong>中继服务器能看到什么？</strong></summary>
+
+只有一个猜不到的主题名和密文。信封在离开本机前就已经用集群密钥派生的密钥加密并签名，公共 ntfy.sh（或你自托管的 `relay_server.py`）既读不到内容，也伪造不了消息。
 
 </details>
 
@@ -211,6 +256,7 @@ CDP 可以控制 IDE 窗口。只把调试端口绑定在 localhost，不要暴�
 - [Providers](./docs/providers.md) — cc-connect 和 CDP provider 配置
 - [CLI Reference](./docs/cli.md) — 完整命令列表
 - [Operations](./docs/operations.md) — hook server、session 初始化、排障
+- [跨机器联邦](./docs/federation.md) — 其他电脑、`name@node`、路径选择、安全、自托管中继
 - [AI-agent install guide](./INSTALL.md) — 给 agent 执行的安装步骤
 
 ## 🤝 Contributing / License / Star History / Acknowledgments

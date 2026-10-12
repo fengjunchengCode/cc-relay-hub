@@ -96,3 +96,21 @@ For CDP agents, an empty `Session` or `Last Seen: never` is expected; use `cdp s
 
 This lets commands such as `send codex "task"` choose the Codex-like agent in the same group when that is unambiguous.
 Exact names do not bypass group isolation: `send` and `relay` reject cross-group targets, including ungrouped-to-named-group sends.
+
+## Cross-node commands
+
+| Command | Purpose |
+| --- | --- |
+| `cc-relay-hub node install [--name N] [--port P] [--rendezvous URL]` | Create `node.json` + cluster secret if missing, register the daemon as a login service (launchd / systemd user / Windows task) and start it |
+| `cc-relay-hub node start` | Run the daemon in the foreground (what the service runs) |
+| `cc-relay-hub node stop` / `restart` / `uninstall` | Service control |
+| `cc-relay-hub node status [--json]` | Node identity, rendezvous connection, peers with current path (lan/wan/relay), outbox backlog |
+| `cc-relay-hub node invite` | Print the `ccrelay://join/…` string a new computer needs |
+| `cc-relay-hub node join <string>` | Join that cluster; reloads a running daemon |
+| `cc-relay-hub node doctor [--json]` | Connectivity checks with a fix per failing item; exit 0 ok, 3 failures |
+| `cc-relay-hub node discover` | Nodes seen on the LAN that belong to other clusters |
+| `cc-relay-hub peer list [--json]` / `add host:port` / `remove <node>` | Inspect or hand-edit peers |
+| `cc-relay-hub send <agent>@<node> "task" [--no-reply] [--wait] [--no-queue]` | Cross-node send; `--no-queue` fails instead of queueing when the node is offline |
+| `cc-relay-hub list` | Local agents plus a "Remote agents" table addressed as `name@node` |
+
+Details and the message flow: [federation.md](./federation.md).

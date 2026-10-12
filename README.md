@@ -29,6 +29,31 @@ cc-relay-hub adds that private agent-to-agent handoff. Agents can discover peers
   <strong>Local first</strong> · <strong>Agent agnostic</strong> · <strong>Quiet handoffs</strong> · <strong>Reply loops that close</strong>
 </p>
 
+## 🆕 New: agents on other computers (cross-node federation)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/fengjunchengCode/cc-relay-hub/main/docs/assets/cc-relay-hub-cross-node-hero.png" alt="cc-relay-hub cross-node: a laptop at home and a desktop at the office, each running Claude and Codex, linked by a LAN direct path or an encrypted relay cloud" width="920">
+</p>
+
+Your agents no longer have to live on one machine. Every computer runs one **node daemon**, and any agent anywhere in your cluster is addressed as `name@node`:
+
+```bash
+cc-relay-hub node install                 # on every computer, once
+cc-relay-hub node invite                  # on a computer already in the cluster -> ccrelay://join/...
+cc-relay-hub node join "ccrelay://join/…" # on the new computer (paste the string to its agent in chat)
+
+cc-relay-hub list                         # remote agents appear as codex-bot@office
+cc-relay-hub send codex-bot@office "implement the plan and run the tests"
+```
+
+- 🔌 **Zero network setup** — no VPN, no port forwarding, no accounts. Computers find each other through encrypted address cards on a rendezvous topic (public ntfy.sh by default, or your own `relay_server.py`).
+- 🛣️ **Best path, automatically** — same LAN → direct in milliseconds; any reachable address → direct; otherwise → encrypted relay. Paths are re-probed every minute and switch on their own.
+- 🔐 **Encrypted end to end** — every envelope that leaves a machine is encrypted and signed with keys derived from the cluster secret. The relay only ever sees ciphertext; unsigned requests get a bare `401`.
+- 🔁 **Same reply loop** — the request is delivered on the target computer by its own daemon (busy-session check, marker ack), and the reply is injected into the origin conversation by the origin daemon. Offline target? `send` prints `queued` and the daemon retries for up to 48 h.
+- 🧭 **Agents learn it by themselves** — generated CLAUDE.md / AGENTS.md list remote peers as `name@node`, and `cc-relay-hub node doctor` explains any connectivity problem with the fix.
+
+Read the details in [docs/federation.md](./docs/federation.md). Everything local keeps working exactly as before.
+
 ## ✨ Why cc-relay-hub?
 
 - 📱 <strong>Command agents from your phone</strong> — Keep the cc-connect mobile workflow, then let local agents continue the work without you switching windows.
@@ -108,6 +133,8 @@ cc-relay-hub send <agent> "status update" --no-reply
 cc-relay-hub inbox
 cc-relay-hub relay <from-agent> <to-agent> "task"  # synchronous diagnostic handoff
 cc-relay-hub watch
+cc-relay-hub node install | status | invite | join <string> | doctor   # other computers
+cc-relay-hub send <agent>@<node> "task"                                 # cross-node send
 ```
 
 Private agent-to-agent messages are asynchronous by default: send the task, then let the target's marked reply be forwarded by the hook server. Do not open listeners or use `--wait` from an agent conversation unless a human explicitly asks for a synchronous diagnostic wait.
@@ -159,6 +186,17 @@ This brings Electron IDE agents into the same local team as Claude Code and Code
 
 <!-- TODO: Screenshot/GIF: Hermes sends a task to Antigravity through CDP and receives the reply. Suggested path: docs/assets/demo-antigravity-cdp.gif -->
 
+### 4. Hand work to an agent on another computer
+
+Your laptop's Claude plans at home; the office desktop's Codex has the big checkout and the test fixtures:
+
+```bash
+cc-relay-hub list                                   # codex-bot@office  codex  [team]  online  lan
+cc-relay-hub send codex-bot@office "Apply the plan in PLAN.md and run the full suite"
+```
+
+The office daemon delivers the task into Codex's own session, Codex answers with the relay marker, and the answer shows up in the laptop conversation that asked. If the desktop is asleep, the request waits in the outbox and goes out when it wakes.
+
 ## 🧩 Support matrix
 
 | Agent / tool | Route | Status | Best for |
@@ -170,8 +208,8 @@ This brings Electron IDE agents into the same local team as Claude Code and Code
 | Antigravity | CDP | ✅ | IDE automation through a local Electron window |
 | Hermes | local orchestrator | ✅ | Discovering peers, dispatching work, collecting replies |
 | Other Electron IDEs | CDP backend | ⚠️ | Possible when a backend can find the chat UI |
-| Windows | local CLI | ⚠️ | Core code is portable, but the happy path is currently macOS/Linux-tested. |
-| Cross-machine relay | custom network setup | ⚠️ | Default mode is same-machine; cross-machine use needs your own security boundary. |
+| Windows | local CLI + node daemon | ✅ | Runs as a cluster peer (verified: a Windows desktop and a macOS node exchanging tasks and replies). |
+| Other computers | node daemon (`name@node`) | ✅ | Encrypted cross-node delivery with automatic LAN-direct / relay path selection; see [docs/federation.md](./docs/federation.md). |
 
 ## ❓ FAQ
 
@@ -199,14 +237,21 @@ CDP can control an IDE window. Keep the debugging port on localhost, do not expo
 <details>
 <summary><strong>Does it support Windows?</strong></summary>
 
-The project is designed around portable Python and local processes, but the current happy path is macOS/Linux. Windows support should be treated as community-tested until more reports land.
+Yes. The CLI, the hook server and the node daemon run on Windows (Python 3.9+), and `cc-relay-hub node install` registers the daemon as a logon task. A Windows desktop has been verified as a cluster peer exchanging tasks and replies with a macOS node.
 
 </details>
 
 <details>
 <summary><strong>Can it run across machines?</strong></summary>
 
-The default design is same-machine. Cross-machine routing is possible only if you provide networking, authentication, and port security yourself.
+Yes, that is what the node daemon is for. Run `cc-relay-hub node install` on each computer, join them with one invite string, and address remote agents as `name@node`. No VPN or open ports are needed: computers on different networks talk through an encrypted relay and upgrade to a direct connection whenever one is possible. See [docs/federation.md](./docs/federation.md).
+
+</details>
+
+<details>
+<summary><strong>What does the relay server see?</strong></summary>
+
+Only an unguessable topic name and ciphertext. Envelopes are encrypted and authenticated with keys derived from the cluster secret before they leave the machine, so the public ntfy.sh instance (or your own `relay_server.py`) cannot read or forge messages.
 
 </details>
 
@@ -216,6 +261,7 @@ The default design is same-machine. Cross-machine routing is possible only if yo
 - [Providers](./docs/providers.md) — cc-connect and CDP provider setup
 - [CLI Reference](./docs/cli.md) — full command list
 - [Operations](./docs/operations.md) — hook server, session setup, troubleshooting
+- [Cross-node federation](./docs/federation.md) — other computers, `name@node`, paths, security, self-hosted relay
 - [AI-agent install guide](./INSTALL.md) — installation steps an agent can execute
 
 ## 🤝 Contributing / License / Star History / Acknowledgments
