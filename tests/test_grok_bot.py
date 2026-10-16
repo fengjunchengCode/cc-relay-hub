@@ -5,10 +5,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests import require_sandbox
+require_sandbox()
 
 from cdp.backends.grok_bot import (FileLease, GrokBotBackend, GrokConnection,
                                    ReplyTracker, acknowledgement_only, added_since)
@@ -126,7 +130,11 @@ class TransportTest(unittest.TestCase):
     def test_response_id_matching_ignores_unsolicited_cdp_events(self):
         ws = MagicMock()
         ws.recv.side_effect = [json.dumps({'method': 'Page.event'}), json.dumps({'id': 99, 'result': {}}), json.dumps({'id': 1, 'result': {'result': {'value': 'right'}}})]
-        with patch('websocket.create_connection', return_value=ws):
+        # Exercise our transport with a fake websocket module; the optional
+        # live-CDP dependency must not come from the real user's site-packages.
+        websocket = types.ModuleType('websocket')
+        websocket.create_connection = MagicMock(return_value=ws)
+        with patch.dict(sys.modules, {'websocket': websocket}):
             conn = GrokConnection('ws://127.0.0.1/fake')
             self.assertEqual(conn.evaluate('example'), 'right')
 

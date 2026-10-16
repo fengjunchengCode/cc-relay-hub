@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests import require_sandbox
+require_sandbox()
+
 from core.envelope import RelayEnvelope  # noqa: E402
 from providers.cc_connect import CCConnectProvider, _parse_timestamp  # noqa: E402
 

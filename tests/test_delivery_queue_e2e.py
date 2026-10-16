@@ -19,6 +19,12 @@ import time
 import unittest
 import urllib.request
 
+import sys as _test_sys
+from pathlib import Path as _TestPath
+_test_sys.path.insert(0, str(_TestPath(__file__).resolve().parents[1]))
+from tests import require_sandbox
+require_sandbox()
+
 from core.state import StateStore
 from core.delivery_queue import DeliveryQueue
 

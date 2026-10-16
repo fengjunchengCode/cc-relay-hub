@@ -8,6 +8,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests import require_sandbox
+require_sandbox()
+
 import hub  # noqa: E402
 from core.envelope import RelayEvent  # noqa: E402
 from core.state import StateStore  # noqa: E402

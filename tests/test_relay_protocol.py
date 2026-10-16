@@ -6,6 +6,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests import require_sandbox
+require_sandbox()
+
 from core.envelope import RelayEnvelope
 from core.relay_protocol import build_relay_prompt, extract_reply_from_transcript
 

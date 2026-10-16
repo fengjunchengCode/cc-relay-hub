@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests import require_sandbox
+require_sandbox()
+
 from core.envelope import RelayEnvelope
 from providers.cdp_provider import CDPProvider
 

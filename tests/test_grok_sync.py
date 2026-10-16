@@ -12,6 +12,9 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tests import require_sandbox
+require_sandbox()
+
 import grok_sync
 import hub
 from core.envelope import RelayEnvelope

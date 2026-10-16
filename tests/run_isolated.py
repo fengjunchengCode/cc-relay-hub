@@ -1,35 +1,58 @@
-"""Run all unit/integration tests without discovering the user's live registry.
+"""Run tests in a fresh interpreter with a temporary HOME and production-file guard.
 
-Usage: python3 tests/run_isolated.py [test_module ...]
-Every default DB/hook subprocess points at a TemporaryDirectory. Individual
-fixtures can use their own temporary paths. No real relay send is part of this
-runner; external providers in tests are fakes and localhost test webhooks.
+Usage: python3 -B tests/run_isolated.py [--guard-report /tmp/report.json] [tests.test_name ...]
 """
+import argparse
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
-import unittest
 
+sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+# Import the standalone helper, not the tests package which deliberately rejects
+# an unisolated interpreter. No application modules are imported in the parent.
+from sandbox import make_environment, protected_paths, require_sandbox, snapshot, verify_snapshot
 
 
-def main():
-    with tempfile.TemporaryDirectory(prefix='relay-test-') as folder:
-        root = Path(folder) / 'cc-relay-hub'
-        root.mkdir()
-        os.environ['CC_RELAY_HUB_DIR'] = str(root)
-        (root/'registry.json').write_text(json.dumps({'version':2,'agents':{},'groups':{}}))
-        (root/'bindings.json').write_text(json.dumps({'cc_connect':{},'cdp':{}}))
-        if len(sys.argv) > 1:
-            suite = unittest.defaultTestLoader.loadTestsFromNames(sys.argv[1:])
+def worker(names):
+    require_sandbox()
+    import unittest
+    suite = (unittest.defaultTestLoader.loadTestsFromNames(names) if names else
+             unittest.defaultTestLoader.discover(str(ROOT/'tests'), top_level_dir=str(ROOT)))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--guard-report', help='Write before/after hashes and timestamps (no file contents)')
+    parser.add_argument('tests', nargs='*')
+    args = parser.parse_args(argv)
+    if args.worker: return worker(args.tests)
+    before = snapshot(protected_paths())
+    code = 1
+    try:
+        with tempfile.TemporaryDirectory(prefix='relay-tests-') as folder:
+            env = make_environment(folder, ROOT)
+            cwd = Path(folder)/'work'; cwd.mkdir()
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()), '--worker', *args.tests],
+                                    cwd=str(cwd), env=env)
+            code = result.returncode
+    finally:
+        report = verify_snapshot(before)
+        if args.guard_report:
+            Path(args.guard_report).write_text(json.dumps(report, indent=2)+'\n')
+        if report['ok']:
+            print('Production file guard: unchanged (%d paths; mtime + SHA-256).' % len(before), flush=True)
         else:
-            suite = unittest.defaultTestLoader.discover(str(ROOT/'tests'))
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
-        return 0 if result.wasSuccessful() else 1
+            print('Production file guard FAILED: '+', '.join(report['changed']), file=sys.stderr, flush=True)
+            code = 1
+    return code
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == '__main__': sys.exit(main())

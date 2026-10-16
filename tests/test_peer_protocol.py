@@ -7,6 +7,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from tests import require_sandbox
+require_sandbox()
+
 from core import crypto, node_identity, peer_protocol  # noqa: E402
 
 

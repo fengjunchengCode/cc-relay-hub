@@ -11,6 +11,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from tests import require_sandbox
+require_sandbox()
+
 class InstallAssetsTest(unittest.TestCase):
     def test_skill_file_exists(self):
         skill_path = ROOT / "skills" / "cc-relay.md"

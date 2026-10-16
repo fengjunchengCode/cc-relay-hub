@@ -15,6 +15,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+from tests import require_sandbox
+require_sandbox()
+
 def _node_available():
     try:
         subprocess.run(["node", "--version"], capture_output=True, check=True)

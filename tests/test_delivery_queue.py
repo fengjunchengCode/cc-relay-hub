@@ -11,6 +11,12 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+import sys as _test_sys
+from pathlib import Path as _TestPath
+_test_sys.path.insert(0, str(_TestPath(__file__).resolve().parents[1]))
+from tests import require_sandbox
+require_sandbox()
+
 import hub
 from core.delivery_queue import DeliveryQueue, NOTICE_TTL, REQUEST_TTL, drain
 from core.envelope import DeliveryReceipt, RelayEnvelope

@@ -323,9 +323,11 @@ before input/Enter can be automatically resent. If an ACK is never persisted by
 cc-connect, exactly-once delivery cannot be guaranteed; this is durable retry
 with stable IDs and observed-marker deduplication, not a receiver transaction.
 
-Tests: `python3 tests/run_isolated.py` seeds an empty temporary registry and DB;
-`python3 tests/run_isolated.py tests.test_delivery_queue tests.test_delivery_queue_e2e`
+Tests: `python3.11 -B tests/run_isolated.py` uses a fresh interpreter and temporary
+HOME, registry and DB, and checks production file fingerprints afterwards;
+`python3.11 -B tests/run_isolated.py tests.test_delivery_queue tests.test_delivery_queue_e2e`
 runs the queue acceptance subset. The end-to-end test uses a local simulated
 webhook and a separate hook server, both sessions named codex-bot, and verifies
 busy → durable queue → idle → FIFO delivery → reply outbox → origin delivery.
-Never use another real agent's identity or production DB for tests.
+Never use another real agent's identity or production DB for tests. See
+[Testing safely](testing.md) for the required runner and isolation guarantees.

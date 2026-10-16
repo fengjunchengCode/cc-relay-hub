@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests import require_sandbox
+require_sandbox()
+
 import hub  # noqa: E402
 
 
@@ -27,6 +30,9 @@ class WindowsCompatTest(unittest.TestCase):
             r"""
             import builtins
             import json
+            # Load the host subprocess module before faking msvcrt below;
+            # Python 3.11 uses its presence to decide whether to import _winapi.
+            import subprocess
             import sys
             import tempfile
             import types
