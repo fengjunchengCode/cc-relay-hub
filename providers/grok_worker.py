@@ -1,12 +1,13 @@
 """Durable Grok reply reader, detached from the CLI that submitted the task.
 
-The only background loop lives here, in the provider; callers never need
---wait or custom CDP polling. Completed text goes through handle_hook_event
-and the existing durable notification outbox, including busy-origin retries.
+The only CDP reader loop lives here. Asynchronous results use handle_hook_event
+and the durable notification outbox, including busy-origin retries. One-shot
+synchronous callers read the same stored result without an extra chat notice.
 """
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
@@ -20,6 +21,11 @@ import time
 from cdp.backends.base import CDPConfig
 from cdp.backends.grok_bot import GrokBotBackend, ReplyTracker, runtime_dir
 from core.envelope import DeliveryReceipt
+
+
+# Per-invocation adapter context, serialized into the job before spawning.
+# Other CLI processes and asynchronous requests retain their normal behavior.
+SYNC_REQUEST = ContextVar('grok_sync_request', default=None)
 
 
 def save_job(path, job):
@@ -45,6 +51,10 @@ def make_backend(binding):
 
 
 def start_request(agent_id, binding, envelope):
+    sync = SYNC_REQUEST.get()
+    if sync is not None:
+        binding = dict(binding, response_timeout_secs=sync['timeout'])
+        sync['request_id'] = envelope.request_id
     started = time.time()
     path = job_path(envelope.request_id)
     backend = make_backend(binding)
@@ -56,6 +66,8 @@ def start_request(agent_id, binding, envelope):
             raise RuntimeError('Grok request already exists; use the worker resume command, not another send')
         job = {'version': 1, 'agent_id': agent_id, 'binding': dict(binding),
                'envelope': asdict(envelope), 'phase': 'sending', 'created_at': started}
+        if sync is not None:
+            job['result_delivery'] = 'stdout'
         save_job(path, job)
         initial = backend.begin(envelope.body, envelope.request_id)
         tracker = ReplyTracker(envelope.request_id, started, timeout=timeout_for(binding))
@@ -87,7 +99,7 @@ def start_request(agent_id, binding, envelope):
 
 
 def deliver_result(job):
-    """Reuse exactly the hook/outbox path used by cc-connect replies."""
+    """Persist stdout-mode results; otherwise reuse the cc-connect hook/outbox."""
     import hub
     request_id = job['envelope']['request_id']
     if not job['envelope'].get('expect_reply', True):
@@ -104,6 +116,18 @@ def deliver_result(job):
         time.sleep(0.1)
     if message.get('status') == 'failed':
         raise RuntimeError('Relay message failed; result retained for explicit recovery')
+    if job.get('result_delivery') == 'stdout':
+        # The existing --wait framework reads this same message row. A one-shot
+        # caller consumes stdout, so do not also enqueue a later chat notice.
+        if message.get('target') != job['agent_id']:
+            raise RuntimeError('Synchronous Grok result target mismatch')
+        if message.get('status') != 'replied' or message.get('reply_body') != job['result']:
+            now = time.time()
+            store.append_event('message.sync_reply', job['agent_id'], request_id,
+                               message['session_key'], job['result'], now)
+            store.mark_replied(request_id, job['result'], now)
+        store.release_session_lock(message['session_key'], request_id)
+        return {'status': 'stdout', 'request_id': request_id}
     result = hub.handle_hook_event({
         'event': 'message.sent', 'project': job['agent_id'],
         'session_key': message['session_key'],

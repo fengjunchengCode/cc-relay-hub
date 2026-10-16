@@ -166,8 +166,9 @@ An application-wide file lock serializes Bot switching, sending, and snapshot
 reads. It is released while answers are being generated, so different Bots can
 run concurrently. A second lease prevents two relay tasks from using the same
 Bot at once. A busy Bot or a nonempty unsent draft is left untouched and `send`
-reports failure. Do not run legacy `grok_ask.mjs` scripts concurrently: those
-scripts do not share the relay's lock. Manual interaction during a task can
+reports failure. The updated `bin/grok_ask.mjs` wrapper shares these locks;
+older standalone CDP copies and the deprecated `grok_to.mjs` / `grok_tail.mjs`
+do not. Manual interaction during a task can
 change its destination; use an idle Bot for other work.
 
 The reader takes **all assistant messages after the unique current user-message
@@ -208,6 +209,56 @@ and relay message state before recovery; it is deliberately not retried
 automatically. Once a result is accepted by the hook, the existing outbox handles
 delivery retries when the origin is busy. A machine/app shutdown can delay or
 prevent observation; the deadline still returns any preserved partial answer.
+
+### Synchronous calls for one-shot jobs
+
+The existing `send --wait` can read Grok replies from the shared message store,
+but prints raw text, retains asynchronous notifications, and has a wait timeout
+separate from the Bot reader. Use the dedicated adapter for scheduled jobs:
+
+```bash
+cc-relay-hub grok-sync grok-x --timeout 1800 "Research this keyword"
+cc-relay-hub grok-sync grok-admin --message-file /absolute/path/question.txt
+cc-relay-hub grok-sync --bot-name 总管 --message-file /absolute/path/question.txt
+```
+
+This local macOS entry point reuses `hub.cmd_send` for group, origin and private
+channel checks, `wait_for_reply_framework` for waiting, and the **same detached
+Grok reader, Bot lease, app lock, message collection and completion rules** as
+asynchronous sends. `--timeout` sets this request's reader deadline in seconds
+(default: 1800; YouTube: 2700). The CLI allows up to 30 additional seconds to
+finish a bounded DOM read and persist the result. Binding defaults are not
+changed. Different Bots can run synchronous and asynchronous work concurrently.
+
+Standard output contains only a result envelope:
+
+```text
+OK
+The complete new reply, including all split messages.
+```
+
+Timeouts start with `TIMEOUT`, followed by the preserved partial reply and its
+`[TIMEOUT]` explanation. Exit status is 0 for OK, 1 for timeout, or 2 for a
+send/routing error (a `TIMEOUT` envelope containing `[ERROR]`, also reported on
+stderr). Invalid CLI syntax uses the usual argparse error on stderr. Synchronous
+results are persisted in the message store and job checkpoint, but **do not also
+enqueue a chat notification**. This lets a scheduled one-shot session consume
+the result immediately. Interrupted callers can inspect/resume the saved job;
+the original question is never automatically resent.
+
+The compatibility wrapper keeps its four positional parameters:
+
+```bash
+node /path/to/grok_ask.mjs 总管 /path/question.txt /path/answer.txt 15
+```
+
+It calls `grok-sync --bot-name`, writes exactly the stdout envelope to the output
+file, echoes it on stdout, and propagates the exit code. Its optional timeout
+remains **minutes, default 15**, preserving the old interface. Bot names must
+already be registered (no hidden direct-CDP fallback). File paths and questions
+are passed as argument arrays/file input, without a shell or output-buffer cap.
+The versioned copy is `bin/grok_ask.mjs`; the project copy under `工具/cdp/`
+is identical. `CC_RELAY_HUB_BIN` may select a different installed relay executable.
 
 ## Backend Status
 

@@ -17,13 +17,19 @@ resolve_dir() {
 }
 
 SCRIPT_DIR="$(resolve_dir "$0")"
+ENTRYPOINT="$SCRIPT_DIR/../hub.py"
+# Keep the Grok synchronous adapter separate from the shared hub CLI.
+if [ "${1:-}" = "grok-sync" ]; then
+  ENTRYPOINT="$SCRIPT_DIR/../grok_sync.py"
+  shift
+fi
 
 run_if_usable() {
   candidate="$1"
   shift
   if command -v "$candidate" >/dev/null 2>&1; then
     if "$candidate" -c "import sys; assert sys.version_info >= (3, 9); import tomllib" 2>/dev/null || "$candidate" -c "import sys; assert sys.version_info >= (3, 9); import tomli" 2>/dev/null; then
-      exec "$candidate" "$SCRIPT_DIR/../hub.py" "$@"
+      exec "$candidate" "$ENTRYPOINT" "$@"
     fi
   fi
 }
@@ -33,7 +39,7 @@ run_if_usable python "$@"
 
 if command -v py >/dev/null 2>&1; then
   if py -3 -c "import sys; assert sys.version_info >= (3, 9); import tomllib" 2>/dev/null || py -3 -c "import sys; assert sys.version_info >= (3, 9); import tomli" 2>/dev/null; then
-    exec py -3 "$SCRIPT_DIR/../hub.py" "$@"
+    exec py -3 "$ENTRYPOINT" "$@"
   fi
 fi
 
