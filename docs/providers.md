@@ -5,7 +5,7 @@ cc-relay-hub currently supports two provider families: `cc_connect` and `cdp`.
 | Provider | Transport | Reply detection | Best fit |
 | --- | --- | --- | --- |
 | `cc_connect` | Local HTTP webhook | `message.sent` hook server | Claude Code, Codex, Gemini CLI, or any agent already bridged by cc-connect |
-| `cdp` | Chrome DevTools Protocol WebSocket | DOM transcript polling with relay markers | Electron IDEs such as Antigravity, Cursor, or other IDE UIs with local CDP enabled |
+| `cdp` | Chrome DevTools Protocol WebSocket | IDE relay markers; Grok Bot uses new assistant messages and an idle window | Electron IDEs and Grok Bot with local CDP enabled |
 
 ## cc-connect Provider
 
@@ -97,10 +97,123 @@ cc-relay-hub cdp screenshot antigravity-ide --path /tmp/antigravity.png
 
 CDP can control the target IDE window. Keep debugging ports bound to `127.0.0.1`, do not expose them to a network, and close the IDE debugging session when not needed.
 
+## Grok Bot (macOS)
+
+The `grok_bot` CDP backend addresses each sidebar Bot as a separate relay agent.
+It starts `/Applications/Grok Bot.app` with `open -a "Grok Bot" --args
+--remote-debugging-port=9333` when CDP is unavailable. An already running app
+that was started without debugging may require a normal manual restart; the
+relay never kills the app. Python needs `websocket-client`, as for the existing
+CDP backend. It neither logs in nor changes the application.
+
+Back up `registry.json` and `bindings.json` before registration. Merge an agent
+entry into the registry and add its name to the appropriate group's `members`:
+
+```json
+{
+  "grok-admin": {
+    "type": "grok_bot",
+    "provider": "cdp",
+    "work_dir": "/path/to/project",
+    "capabilities": ["message.send"],
+    "labels": ["grok", "bot"]
+  }
+}
+```
+
+Merge the corresponding entry into `bindings.json` under `cdp`:
+
+```json
+{
+  "grok-admin": {
+    "backend": "grok_bot",
+    "cdp_port": 9333,
+    "bot_name": "总管",
+    "response_timeout_secs": 1800
+  }
+}
+```
+
+The deployed `fjc-group` mappings are:
+
+| Agent | Sidebar Bot | Reply deadline |
+| --- | --- | --- |
+| `grok-competitor` | 竞品站 | 30 minutes |
+| `grok-x` | X热度 | 30 minutes |
+| `grok-tiktok` | TikTok热度 | 30 minutes |
+| `grok-youtube` | YouTube热度 | 45 minutes |
+| `grok-outreach` | 外链 | 30 minutes |
+| `grok-admin` | 总管 | 30 minutes |
+
+```bash
+cc-relay-hub list
+cc-relay-hub info grok-admin
+cc-relay-hub cdp status grok-admin
+cc-relay-hub send grok-admin "请只回复：测试通过"
+```
+
+Run `send` in the initiating agent's normal cc-connect environment so
+`CC_PROJECT` and `CC_SESSION_KEY` identify the real return conversation. No
+`--wait`, listener, or caller-side CDP script is necessary. The CLI returns after
+confirming that the user message was inserted; a detached provider reader
+collects the answer. It wraps the answer in the matching relay reply marker and
+passes it to the existing hook handler and durable origin-notification outbox.
+Grok itself does not need to emit a reply marker. The binding's
+`response_timeout_secs` controls the reader deadline, independently of the CLI's
+synchronous `--wait` timeout.
+
+An application-wide file lock serializes Bot switching, sending, and snapshot
+reads. It is released while answers are being generated, so different Bots can
+run concurrently. A second lease prevents two relay tasks from using the same
+Bot at once. A busy Bot or a nonempty unsent draft is left untouched and `send`
+reports failure. Do not run legacy `grok_ask.mjs` scripts concurrently: those
+scripts do not share the relay's lock. Manual interaction during a task can
+change its destination; use an idle Bot for other work.
+
+The reader takes **all assistant messages after the unique current user-message
+anchor**, including multiple articles in one message block. It retains earlier
+chunks if the DOM virtualizes them away. When the task anchor has left the DOM,
+the reader scrolls the observed transcript back to the question, collects rows
+by their visible `data-index` and article position, then returns to the bottom.
+This also recovers split chunks that arrived and left the viewport between two
+reads. A scan that cannot reach the question cannot count as a successful
+completion. No whole-page tail or output-length limit is used. Busy indicators
+are scoped to the current chat so another Bot's work notification does not
+block completion. Completion
+requires both no busy indicator and 60 seconds without new reply content. If
+only short acknowledgement messages remain idle for three minutes, one follow-up
+asks for the complete result. A deadline or another user's message returns
+`[TIMEOUT]` followed by any already collected content. Images are represented as
+`[图片 N 张，未取回]`; image bytes are not downloaded.
+
+`info` and `cdp status` report CDP availability, whether the app is running, the
+requested Bot, the currently displayed Bot, and that displayed Bot's busy state.
+Health checks do not switch Bots or start the application.
+
+Reader checkpoints and logs are private files under
+`$CC_RELAY_HUB_DIR/.cc-relay-hub/grok/` (default
+`~/.cc-connect/cc-relay-hub/.cc-relay-hub/grok/`). Job filenames are the SHA-256
+of the request ID; checkpoints contain the task and full reply and must not be
+committed. Logs contain status and character counts, not reply text. If a reader
+process exits unexpectedly, resume an existing `waiting` or `result_ready` job
+from the repository root:
+
+```bash
+python3 -m providers.grok_worker --job /absolute/path/to/job.json
+```
+
+Resume never sends the original task again. A live reader's Bot lease prevents
+duplicate resume. A `send_unconfirmed` checkpoint requires inspecting the Bot
+and relay message state before recovery; it is deliberately not retried
+automatically. Once a result is accepted by the hook, the existing outbox handles
+delivery retries when the origin is busy. A machine/app shutdown can delay or
+prevent observation; the deadline still returns any preserved partial answer.
+
 ## Backend Status
 
 | Backend | Status | Notes |
 | --- | :---: | --- |
 | Antigravity | ✅ | Primary CDP backend |
 | Cursor | ⚠️ | Stub/backend work in progress |
+| Grok Bot | ✅ | Per-Bot routing, full multi-message replies, detached asynchronous reader |
 | Other Electron IDEs | ⚠️ | Requires a backend that can locate the chat input and transcript |

@@ -34,13 +34,19 @@ class CDPProvider(MessageProvider, ControlProvider):
         from cdp.backends.base import CDPConfig
 
         backend_name = self.binding.get("backend", "antigravity")
-        port = int(self.binding.get("cdp_port", 9000))
+        port = int(self.binding.get("cdp_port", 9333 if backend_name == "grok_bot" else 9000))
         config = CDPConfig(port=port)
         BackendClass = get_backend(backend_name)
-        self._backend = BackendClass(config)
+        if backend_name == "grok_bot":
+            self._backend = BackendClass(config, bot_name=self.binding["bot_name"])
+        else:
+            self._backend = BackendClass(config)
         return self._backend
 
     def deliver(self, envelope):
+        if self.binding.get("backend") == "grok_bot":
+            from providers.grok_worker import start_request
+            return start_request(self.agent_id, self.binding, envelope)
         prompt = build_relay_prompt(envelope)
         delivered_at = time.time()
 
@@ -117,6 +123,8 @@ class CDPProvider(MessageProvider, ControlProvider):
         return []
 
     def get_health(self):
+        if self.binding.get("backend") == "grok_bot":
+            return self._grok_health()
         port = int(self.binding.get("cdp_port", 9000))
         details = "backend=%s, port=%d" % (
             self.binding.get("backend", "antigravity"),
@@ -152,5 +160,30 @@ class CDPProvider(MessageProvider, ControlProvider):
             details=details,
         )
 
+    def _grok_health(self):
+        import subprocess
+        backend = self._ensure_backend()
+        reachable, _ = backend.is_running()
+        running = reachable
+        if not running:
+            try:
+                running = subprocess.run(["pgrep", "-f", r"^/Applications/Grok Bot.app/Contents/MacOS/"],
+                                         capture_output=True, timeout=3).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        details = "backend=grok_bot, port=%d, app_running=%s, target_bot=%s" % (
+            backend.config.port, str(running).lower(), backend.bot_name)
+        status = "unreachable"
+        if reachable:
+            try:
+                snapshot = backend.health_snapshot()
+                status = "busy" if snapshot["busy"] else "idle"
+                details += ", current_bot=%s, busy=%s (current Bot)" % (snapshot["name"], str(snapshot["busy"]).lower())
+            except Exception as exc:
+                status = "target_error"
+                details += ", error=%s" % exc
+        return ProviderHealth("up" if reachable else "down", status, None, None, details)
+
     def supports_control(self):
-        return True
+        # A leading slash is ordinary Grok task text, never an IDE control command.
+        return self.binding.get("backend") != "grok_bot"

@@ -13,6 +13,9 @@ def get_backend(name):
     name = name.lower().strip()
     if name in BACKENDS:
         return BACKENDS[name]
+    if name == "grok_bot":
+        from cdp.backends.grok_bot import GrokBotBackend
+        return GrokBotBackend
     if name == "cursor":
         from cdp.backends.cursor import CursorBackend
         BACKENDS["cursor"] = CursorBackend
@@ -25,4 +28,5 @@ def list_backends():
     return [
         ("antigravity", "Google Antigravity IDE (Electron, CDP)"),
         ("cursor", "Cursor IDE (Electron, CDP) — stub"),
+        ("grok_bot", "Grok Bot (Electron, named Bots, asynchronous replies)"),
     ]

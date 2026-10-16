@@ -1,0 +1,184 @@
+"""Durable Grok reply reader, detached from the CLI that submitted the task.
+
+The only background loop lives here, in the provider; callers never need
+--wait or custom CDP polling. Completed text goes through handle_hook_event
+and the existing durable notification outbox, including busy-origin retries.
+"""
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from cdp.backends.base import CDPConfig
+from cdp.backends.grok_bot import GrokBotBackend, ReplyTracker, runtime_dir
+from core.envelope import DeliveryReceipt
+
+
+def save_job(path, job):
+    temporary = path.with_suffix('.%s.tmp' % os.getpid())
+    fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        json.dump(job, handle, ensure_ascii=False, indent=2)
+        handle.write('\n')
+    os.replace(str(temporary), str(path))
+
+
+def job_path(request_id):
+    return runtime_dir() / (hashlib.sha256(request_id.encode()).hexdigest() + '.json')
+
+
+def timeout_for(binding):
+    default = 2700 if binding.get('bot_name') == 'YouTube热度' else 1800
+    return max(1, int(binding.get('response_timeout_secs', default)))
+
+
+def make_backend(binding):
+    return GrokBotBackend(CDPConfig(port=int(binding.get('cdp_port', 9333))), bot_name=binding['bot_name'])
+
+
+def start_request(agent_id, binding, envelope):
+    started = time.time()
+    path = job_path(envelope.request_id)
+    backend = make_backend(binding)
+    lease = None
+    try:
+        lease = backend.bot_lease()
+        if path.exists():
+            # Existing uncertain/sent task must be resumed, never sent again.
+            raise RuntimeError('Grok request already exists; use the worker resume command, not another send')
+        job = {'version': 1, 'agent_id': agent_id, 'binding': dict(binding),
+               'envelope': asdict(envelope), 'phase': 'sending', 'created_at': started}
+        save_job(path, job)
+        initial = backend.begin(envelope.body, envelope.request_id)
+        tracker = ReplyTracker(envelope.request_id, started, timeout=timeout_for(binding))
+        tracker.observe(initial, time.time())
+        job.update(phase='waiting', tracker=tracker.to_dict(), sent_at=time.time())
+        save_job(path, job)
+        log_path = path.with_suffix('.log')
+        log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(log_fd, 'ab') as log:
+            subprocess.Popen(
+                [sys.executable, '-m', 'providers.grok_worker', '--job', str(path), '--lease-fd', str(lease.fd)],
+                cwd=str(Path(__file__).resolve().parent.parent), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=log, start_new_session=True, pass_fds=(lease.fd,),
+            )
+        # Do not overwrite the worker's checkpoint after spawning it.
+        return DeliveryReceipt(envelope.request_id, 'delivered', 'cdp', job['sent_at'])
+    except Exception as exc:
+        if path.exists():
+            existing = json.loads(path.read_text(encoding='utf-8'))
+            if existing.get('phase') == 'sending':
+                existing.update(phase='send_unconfirmed', error=str(exc))
+                save_job(path, existing)
+        return DeliveryReceipt(envelope.request_id, 'failed', 'cdp', started, str(exc))
+    finally:
+        backend.close()
+        if lease:
+            # Child inherited the same open-file description; no explicit unlock.
+            lease.close()
+
+
+def deliver_result(job):
+    """Reuse exactly the hook/outbox path used by cc-connect replies."""
+    import hub
+    request_id = job['envelope']['request_id']
+    if not job['envelope'].get('expect_reply', True):
+        return {'status': 'notice_complete'}
+    store = hub.StateStore(str(hub.STATE_DB_PATH))
+    # Parent marks the receipt delivered just after launching us.
+    deadline = time.monotonic() + 10
+    while True:
+        message = store.get_message(request_id)
+        if message and message.get('status') != 'pending':
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Relay message was not committed as delivered; result retained for resume')
+        time.sleep(0.1)
+    if message.get('status') == 'failed':
+        raise RuntimeError('Relay message failed; result retained for explicit recovery')
+    result = hub.handle_hook_event({
+        'event': 'message.sent', 'project': job['agent_id'],
+        'session_key': message['session_key'],
+        'content': '[cc-relay reply_to=%s]\n%s' % (request_id, job['result']),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    })
+    if result.get('status') not in ('matched', 'duplicate', 'followup'):
+        raise RuntimeError('Grok result not accepted by relay: %s' % result.get('status'))
+    return result
+
+
+def run_job(path, lease_fd=None):
+    path = Path(path)
+    job = json.loads(path.read_text(encoding='utf-8'))
+    backend = make_backend(job['binding'])
+    lease = None
+    if lease_fd is None:
+        lease = backend.bot_lease()
+    try:
+        if job.get('phase') == 'complete':
+            return
+        if job.get('phase') not in ('waiting', 'result_ready'):
+            raise RuntimeError('Unconfirmed send: inspect Bot manually before recovery; refusing automatic resend')
+        if job['phase'] == 'waiting':
+            tracker = ReplyTracker.restore(job['tracker'])
+            while True:
+                now = time.time()
+                if now >= tracker.deadline:
+                    action = 'timeout'
+                else:
+                    try:
+                        snapshot = backend.read_snapshot(request_id=tracker.request_id)
+                        action = tracker.observe(snapshot, now)
+                        job.pop('last_read_error', None)
+                    except Exception as exc:
+                        tracker.idle_since = None
+                        job['last_read_error'] = str(exc)
+                        action = 'wait'
+                job['tracker'] = tracker.to_dict()
+                save_job(path, job)
+                if action == 'chase':
+                    # Checkpoint chased=True BEFORE sending, including failed/uncertain sends.
+                    try:
+                        backend.chase(tracker.request_id)
+                    except Exception as exc:
+                        job['chase_error'] = str(exc)
+                    save_job(path, job)
+                elif action in ('complete', 'timeout'):
+                    job.update(phase='result_ready', result=tracker.render(timeout=action == 'timeout'),
+                               result_status=action, completed_at=time.time())
+                    save_job(path, job)
+                    break
+                # No application lock or WebSocket is held during this wait.
+                time.sleep(min(10, max(0.01, tracker.deadline - time.time())))
+        job['delivery'] = deliver_result(job)
+        job['phase'] = 'complete'
+        job['notified_at'] = time.time()
+        save_job(path, job)
+        print(json.dumps({'request_id': job['envelope']['request_id'], 'status': job.get('result_status'),
+                          'chars': len(job.get('result', '')), 'delivery': job['delivery'].get('status')}, ensure_ascii=False), flush=True)
+    finally:
+        backend.close()
+        if lease:
+            lease.close()
+        if lease_fd is not None:
+            os.close(lease_fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--job', required=True, help='Saved Grok job JSON (resume without resending)')
+    parser.add_argument('--lease-fd', type=int, default=None, help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    run_job(args.job, args.lease_fd)
+
+
+if __name__ == '__main__':
+    main()
