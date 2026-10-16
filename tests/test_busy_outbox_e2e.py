@@ -145,6 +145,7 @@ class BusyOutboxE2ETest(unittest.TestCase):
 
             hook_port = _free_port()
             env = dict(os.environ)
+            env["CC_RELAY_HUB_DIR"] = str(hub_state_dir)
             env["HOME"] = str(temp_home)
             env["HOOK_PORT"] = str(hook_port)
             env["HOOK_EVENTS_FILE"] = str(temp_home / "events.jsonl")

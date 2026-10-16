@@ -80,6 +80,12 @@ def run(args):
         if job and job.get('tracker'):
             return 1, 'TIMEOUT', ReplyTracker.restore(job['tracker']).render(
                 timeout=True, reason='同步等待结束；以下是检查点中已有的本次回复。')
+        if context.get('request_id'):
+            message = hub.StateStore(str(hub.STATE_DB_PATH)).get_message(context['request_id'])
+            if message and message.get('status') in ('queued', 'expired'):
+                return 1, 'TIMEOUT', '[TIMEOUT] id=%s status=%s; %s' % (
+                    context['request_id'], message['status'], message.get('error') or
+                    '仍在持久投递队列中；同步等待结束不会取消任务。')
         return 2, 'TIMEOUT', '[ERROR] ' + (captured.getvalue().strip() or 'Grok send failed')
     except Exception as exc:
         return 2, 'TIMEOUT', '[ERROR] %s' % exc

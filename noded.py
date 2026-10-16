@@ -520,6 +520,10 @@ class NodeDaemon(object):
             if message and message.get("status") == "pending":
                 if payload.get("status") == "delivered":
                     self.store.mark_delivered(request_id, float(payload.get("delivered_at") or time.time()))
+                elif payload.get("status") == "queued":
+                    # The destination owns a durable local delivery now. Keep
+                    # reply routing alive rather than treating its busy ACK as failure.
+                    self.store.mark_queued(request_id, payload.get("error") or "target busy")
                 else:
                     self.store.mark_failed(request_id, payload.get("error") or payload.get("status") or "failed")
 

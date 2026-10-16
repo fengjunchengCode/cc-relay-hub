@@ -19,7 +19,7 @@ import sys
 import time
 
 from cdp.backends.base import CDPConfig
-from cdp.backends.grok_bot import GrokBotBackend, ReplyTracker, runtime_dir
+from cdp.backends.grok_bot import GrokBotBackend, GrokNotSentError, ReplyTracker, runtime_dir
 from core.envelope import DeliveryReceipt
 
 
@@ -60,20 +60,36 @@ def start_request(agent_id, binding, envelope):
     backend = make_backend(binding)
     lease = None
     try:
-        lease = backend.bot_lease()
-        if path.exists():
-            # Existing uncertain/sent task must be resumed, never sent again.
-            raise RuntimeError('Grok request already exists; use the worker resume command, not another send')
-        job = {'version': 1, 'agent_id': agent_id, 'binding': dict(binding),
-               'envelope': asdict(envelope), 'phase': 'sending', 'created_at': started}
-        if sync is not None:
-            job['result_delivery'] = 'stdout'
-        save_job(path, job)
-        initial = backend.begin(envelope.body, envelope.request_id)
-        tracker = ReplyTracker(envelope.request_id, started, timeout=timeout_for(binding))
-        tracker.observe(initial, time.time())
-        job.update(phase='waiting', tracker=tracker.to_dict(), sent_at=time.time())
-        save_job(path, job)
+        existing = json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
+        if existing and existing.get('phase') == 'complete':
+            return DeliveryReceipt(envelope.request_id, 'delivered', 'cdp', existing.get('sent_at', started))
+        try:
+            lease = backend.bot_lease()
+        except RuntimeError:
+            if existing and existing.get('phase') in ('waiting', 'result_ready'):
+                return DeliveryReceipt(envelope.request_id, 'delivered', 'cdp', existing.get('sent_at', started))
+            raise
+        if existing and existing.get('phase') in ('waiting', 'result_ready'):
+            job = existing  # recover a crashed reader, never send the task again
+        else:
+            job = existing or {'version': 1, 'agent_id': agent_id, 'binding': dict(binding),
+                              'envelope': asdict(envelope), 'created_at': started}
+            job['state_path'] = binding.get('_relay_state_path')
+            if sync is not None:
+                job['result_delivery'] = 'stdout'
+            if existing and existing.get('phase') in ('sending', 'send_unconfirmed'):
+                initial = backend.read_snapshot(request_id=envelope.request_id)
+                anchor = '[cc-relay task_id=%s]' % envelope.request_id
+                if not any(m['role'] == 'user' and anchor in m['text'] for m in initial['messages']):
+                    raise RuntimeError('Send unconfirmed; no automatic resend without an observed task marker')
+            else:
+                job['phase'] = 'sending'
+                save_job(path, job)
+                initial = backend.begin(envelope.body, envelope.request_id)
+            tracker = ReplyTracker(envelope.request_id, started, timeout=timeout_for(binding))
+            tracker.observe(initial, time.time())
+            job.update(phase='waiting', tracker=tracker.to_dict(), sent_at=time.time())
+            save_job(path, job)
         log_path = path.with_suffix('.log')
         log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(log_fd, 'ab') as log:
@@ -88,7 +104,7 @@ def start_request(agent_id, binding, envelope):
         if path.exists():
             existing = json.loads(path.read_text(encoding='utf-8'))
             if existing.get('phase') == 'sending':
-                existing.update(phase='send_unconfirmed', error=str(exc))
+                existing.update(phase='not_sent' if isinstance(exc, GrokNotSentError) else 'send_unconfirmed', error=str(exc))
                 save_job(path, existing)
         return DeliveryReceipt(envelope.request_id, 'failed', 'cdp', started, str(exc))
     finally:
@@ -104,12 +120,12 @@ def deliver_result(job):
     request_id = job['envelope']['request_id']
     if not job['envelope'].get('expect_reply', True):
         return {'status': 'notice_complete'}
-    store = hub.StateStore(str(hub.STATE_DB_PATH))
+    store = hub.StateStore(str(job.get('state_path') or hub.STATE_DB_PATH))
     # Parent marks the receipt delivered just after launching us.
     deadline = time.monotonic() + 10
     while True:
         message = store.get_message(request_id)
-        if message and message.get('status') != 'pending':
+        if message and message.get('status') not in ('pending', 'queued'):
             break
         if time.monotonic() >= deadline:
             raise RuntimeError('Relay message was not committed as delivered; result retained for resume')
@@ -133,7 +149,7 @@ def deliver_result(job):
         'session_key': message['session_key'],
         'content': '[cc-relay reply_to=%s]\n%s' % (request_id, job['result']),
         'timestamp': datetime.now(timezone.utc).isoformat(),
-    })
+    }, state_path=job.get('state_path'))
     if result.get('status') not in ('matched', 'duplicate', 'followup'):
         raise RuntimeError('Grok result not accepted by relay: %s' % result.get('status'))
     return result
@@ -194,6 +210,14 @@ def run_job(path, lease_fd=None):
             lease.close()
         if lease_fd is not None:
             os.close(lease_fd)
+        if job.get('phase') == 'complete':
+            # An idle edge for this Bot, after releasing its inherited task lock.
+            # The same driver also handles missed edges on process/server restart.
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve().parents[1] / 'hub.py'),
+                              '_drain_notifications', '--origin-project', job['agent_id'],
+                              '--origin-session', 'cdp:' + job['agent_id'], '--force'],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def main():

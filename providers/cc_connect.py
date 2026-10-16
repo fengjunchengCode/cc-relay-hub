@@ -24,6 +24,22 @@ class CCConnectProvider(MessageProvider, ControlProvider):
         self.binding = dict(binding)
 
     def deliver(self, envelope):
+        state_path = self.binding.get("_relay_state_path")
+        if not state_path:
+            return self._deliver_unlocked(envelope)
+        from core.state import StateStore
+        from core.delivery_queue import DeliveryQueue
+        queue = DeliveryQueue(StateStore(state_path))
+        with queue.lease("transport", self.agent_id, self.binding["session_key"], seconds=60) as acquired:
+            if not acquired:
+                return DeliveryReceipt(envelope.request_id, "failed", "cc_connect", time.time(), "target busy (transport)")
+            if self._delivery_marker_recorded(_delivery_marker(envelope)):
+                return DeliveryReceipt(envelope.request_id, "delivered", "cc_connect", time.time())
+            if self.get_session_activity().get("status") == "busy":
+                return DeliveryReceipt(envelope.request_id, "failed", "cc_connect", time.time(), "target busy")
+            return self._deliver_unlocked(envelope)
+
+    def _deliver_unlocked(self, envelope):
         delivered_at = time.time()
         prompt = build_relay_prompt(envelope)
         marker = _delivery_marker(envelope)
@@ -48,7 +64,7 @@ class CCConnectProvider(MessageProvider, ControlProvider):
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=10):
+            with urllib.request.urlopen(request, timeout=float(self.binding.get("webhook_timeout", 10))):
                 pass
             ack_timeout = float(self.binding.get("delivery_ack_timeout", 2.0))
             if ack_timeout > 0 and not self._wait_for_delivery_marker(marker, ack_timeout):
@@ -78,13 +94,13 @@ class CCConnectProvider(MessageProvider, ControlProvider):
                 delivered_at=delivered_at,
                 error="HTTP %s%s" % (err.code, detail),
             )
-        except urllib.error.URLError as err:
+        except (urllib.error.URLError, OSError, TimeoutError) as err:
             return DeliveryReceipt(
                 request_id=envelope.request_id,
                 status="failed",
                 provider="cc_connect",
                 delivered_at=delivered_at,
-                error=str(err.reason),
+                error=str(getattr(err, "reason", err)),
             )
 
     def poll_events(self, cursor=None):
@@ -103,7 +119,7 @@ class CCConnectProvider(MessageProvider, ControlProvider):
                 lower_bound = 0.0
 
         events = []
-        sessions = data.get("sessions", {})
+        sessions = self._bound_sessions(data)
         for session in sessions.values():
             if not session:
                 continue
@@ -173,7 +189,7 @@ class CCConnectProvider(MessageProvider, ControlProvider):
         newest = None
         newest_session_id = None
         newest_timestamp = 0.0
-        for session_id, session in (data.get("sessions") or {}).items():
+        for session_id, session in self._bound_sessions(data, active_only=True).items():
             if not session:
                 continue
             for item in (session.get("history") or []):
@@ -273,7 +289,7 @@ class CCConnectProvider(MessageProvider, ControlProvider):
                 # starting. A partial read is not a negative ACK; the caller
                 # will retry during the acknowledgement window.
                 continue
-            for session in (data.get("sessions") or {}).values():
+            for session in self._bound_sessions(data).values():
                 if not session:
                     continue
                 for item in (session.get("history") or []):
@@ -282,6 +298,18 @@ class CCConnectProvider(MessageProvider, ControlProvider):
                     if marker in (item.get("content") or ""):
                         return True
         return False
+
+    def _bound_sessions(self, data, active_only=False):
+        sessions = data.get("sessions") or {}
+        active = data.get("active_session")
+        users = data.get("user_sessions")
+        key = self.binding.get("session_key")
+        if isinstance(active, dict) or isinstance(users, dict):
+            active_id = (active or {}).get(key)
+            ids = [active_id] if active_only else list((users or {}).get(key) or []) + [active_id]
+            return {sid: sessions[sid] for sid in ids if sid in sessions}
+        # Older persisted formats (and minimal fixtures) do not have mappings.
+        return sessions
 
     def _wait_for_delivery_marker(self, marker, timeout_secs):
         deadline = time.monotonic() + max(float(timeout_secs), 0.0)
@@ -326,7 +354,7 @@ def _parse_timestamp(value):
     if not value:
         return 0.0
     try:
-        return datetime.fromisoformat(value).timestamp()
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         normalized = value
         if "." in value:

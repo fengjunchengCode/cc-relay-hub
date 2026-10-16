@@ -59,6 +59,13 @@ def wait_for_reply_framework(store, provider, request_id, session_key, timeout_s
             if message and message.get("status") == "replied":
                 return message.get("reply_body")
 
+            if message and message.get("status") == "expired":
+                return message.get("reply_body") or message.get("error")
+            if message and message.get("status") == "queued":
+                time.sleep(max(float(poll_interval), 0.01))
+                continue
+            if message and message.get("delivered_at") is not None:
+                delivered_at = float(message["delivered_at"])
             events = provider.poll_events(cursor=str(delivered_at))
             for event in events:
                 reply = extract_relay_reply(event.content, request_id)
@@ -74,7 +81,10 @@ def wait_for_reply_framework(store, provider, request_id, session_key, timeout_s
                     store.mark_replied(request_id, reply, event.timestamp)
                     return reply
             time.sleep(max(float(poll_interval), 0.01))
-        store.mark_timeout(request_id, time.time())
+        # A CLI wait deadline is not the lifetime of a durable queued task.
+        message = store.get_message(request_id)
+        if not message or message.get("status") != "queued":
+            store.mark_timeout(request_id, time.time())
         return None
     finally:
         store.release_session_lock(session_key, request_id)

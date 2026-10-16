@@ -261,6 +261,11 @@ def parse_args(argv):
     drain_parser.add_argument("--limit", type=int, default=100)
     drain_parser.add_argument("--format", choices=["text", "json"], default="text")
 
+    queue_parser = subparsers.add_parser("queue", help="Show durable outgoing deliveries by target")
+    queue_parser.add_argument("--target", default=None)
+    queue_parser.add_argument("--all", action="store_true", help="Include delivered and expired items")
+    queue_parser.add_argument("--format", choices=["text", "json"], default="text")
+
     # Groups management
     groups_parser = subparsers.add_parser("groups", help="Manage agent groups")
     groups_sub = groups_parser.add_subparsers(dest="groups_command")
@@ -1038,7 +1043,7 @@ def drain_notification_outbox(
         provider = _origin_session_provider(
             origin_name,
             origin_key,
-            binding,
+            dict(binding, _relay_state_path=str(store.db_path)),
         )
 
         # A previous POST may have been accepted just after its short ACK
@@ -1124,7 +1129,7 @@ def drain_notification_outbox(
         delivery = _send_via_origin_webhook(
             origin_name,
             origin_key,
-            binding,
+            dict(binding, _relay_state_path=str(store.db_path)),
             content,
             notice_id=notice_id,
         )
@@ -1313,7 +1318,7 @@ def handle_hook_event(payload, state_path=None, bindings=None, runner=None):
         )
         return {"status": "unmatched", "request_id": relay_reply["request_id"], "session_key": session_key}
 
-    if message.get("status") not in ("pending", "delivered"):
+    if message.get("status") not in ("queued", "pending", "delivered"):
         # A request_id used to be single-shot: any second reply (progress
         # update, final report after an early ack, late reply after --wait
         # timed out) was dropped as "unmatched" while the sender believed it
@@ -1538,15 +1543,22 @@ def cmd_inbox(args):
 
 
 def cmd_drain_notifications(args):
+    # The same idle-edge/startup/watchdog driver services both directions.
+    # Replies go first; shared transport serialization prevents overlapping POSTs.
+    from core.delivery_queue import drain
     results = drain_notification_outbox(
         origin_project=args.origin_project,
         origin_session=args.origin_session,
         force=args.force,
         limit=args.limit,
     )
+    deliveries = drain(sys.modules[__name__], target=args.origin_project,
+                       session=args.origin_session, force=args.force, limit=args.limit)
     if args.format == "json":
-        print(json.dumps(results, ensure_ascii=False))
+        print(json.dumps(results + deliveries, ensure_ascii=False))
         return 0
+    for item in deliveries:
+        print("%s delivery=%s target=%s" % (item["status"], item["request_id"], item["target"]))
     for item in results:
         print(
             "%s outbox=%s request_id=%s origin=%s"
@@ -2297,6 +2309,13 @@ def deliver_to_local_agent(
     )
     base = {"request_id": request_id, "session_key": effective_session, "created_at": now}
     is_control = message_body.startswith("/") and provider.supports_control()
+    # Commands retain their explicit control semantics; relay messages are
+    # persisted before any network/CDP action, including no-reply notices.
+    from core.delivery_queue import supported, submit
+    if not is_control and supported(agent):
+        return submit(sys.modules[__name__], agent, envelope, state,
+                      origin_project=origin_project, origin_session=origin_session,
+                      origin_node=origin_node, envelope_id=envelope_id)
 
     if not expect_reply:
         if is_control:
@@ -2481,7 +2500,12 @@ def cmd_send(args):
         origin_project=origin_project,
         origin_session=origin_session,
     )
-    if result["status"] != "delivered":
+    if result["status"] == "queued":
+        print("queued (target busy): %s (id=%s expires_at=%.0f); %s" % (
+            agent["name"], result["request_id"], result["expires_at"], result["error"]))
+        if not args.wait or not expect_reply:
+            return 0
+    elif result["status"] != "delivered":
         print(result["error"])
         return 1
     request_id = result["request_id"]
@@ -2951,6 +2975,9 @@ def main(argv=None):
         return cmd_on_hook(args)
     if args.command == "reconcile":
         return cmd_reconcile(args)
+    if args.command == "queue":
+        from core.delivery_queue import show
+        return show(sys.modules[__name__], args)
     if args.command == "inbox":
         return cmd_inbox(args)
     if args.command == "_drain_notifications":

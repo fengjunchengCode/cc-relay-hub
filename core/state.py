@@ -261,6 +261,11 @@ class StateStore(object):
         finally:
             conn.close()
 
+    def mark_queued(self, request_id, reason=None):
+        self._update_message(request_id,
+            "UPDATE messages SET status='queued', error=? WHERE request_id=? AND status='pending'",
+            (reason, request_id))
+
     def mark_delivered(self, request_id, delivered_at):
         self._update_message(
             request_id,
@@ -588,7 +593,7 @@ class StateStore(object):
                 rows = conn.execute(
                     """
                     SELECT * FROM messages
-                    WHERE status IN ('pending', 'delivered') AND created_at >= ?
+                    WHERE status IN ('pending', 'delivered') AND COALESCE(delivered_at, created_at) >= ?
                     ORDER BY created_at ASC
                     """,
                     (now - float(max_age_secs),),

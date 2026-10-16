@@ -166,7 +166,8 @@ An application-wide file lock serializes Bot switching, sending, and snapshot
 reads. It is released while answers are being generated, so different Bots can
 run concurrently. A second lease prevents two relay tasks from using the same
 Bot at once. A busy Bot or a nonempty unsent draft is left untouched and `send`
-reports failure. The updated `bin/grok_ask.mjs` wrapper shares these locks;
+reports `queued (target busy)` with a durable ID; it retries after the Bot finishes
+or the recovery watchdog runs. A draft is never overwritten. The updated `bin/grok_ask.mjs` wrapper shares these locks;
 older standalone CDP copies and the deprecated `grok_to.mjs` / `grok_tail.mjs`
 do not. Manual interaction during a task can
 change its destination; use an idle Bot for other work.
@@ -268,3 +269,63 @@ is identical. `CC_RELAY_HUB_BIN` may select a different installed relay executab
 | Cursor | ⚠️ | Stub/backend work in progress |
 | Grok Bot | ✅ | Per-Bot routing, full multi-message replies, detached asynchronous reader |
 | Other Electron IDEs | ⚠️ | Requires a backend that can locate the chat input and transcript |
+
+## Durable outgoing queue (cc-connect and Grok)
+
+Normal `send` requests and `send --no-reply` notices are committed to both
+`messages` and `delivery_queue` **before** attempting the webhook/CDP operation.
+Busy sessions, webhook failures, timeouts and missing ACKs return exit 0:
+
+```text
+queued (target busy): AGENT (id=REQUEST_ID expires_at=UNIX_SECONDS); REASON
+```
+
+This means accepted by the hub, not yet accepted by the target. Do not resend.
+Group/privacy validation and invalid bindings still fail before delivery. Slash
+control commands retain their existing direct-control semantics.
+
+```bash
+cc-relay-hub queue
+cc-relay-hub queue --target AGENT
+cc-relay-hub queue --all --format json
+```
+
+JSON has `targets[AGENT].pending`, `oldest_age_seconds`, and `items` with
+`request_id`, `target`, `session_key`, `status`, `created_at`, `expires_at`,
+`age_seconds`, `attempts`, `last_error`. It excludes task content. `pending` and
+`sending` are open; `delivered` and `expired` are closed. `inbox` continues to show
+**return** notifications, not outgoing tasks.
+
+An authoritative `message.sent`, `session.idle` or `turn.final` hook schedules
+the existing delayed drain. Each destination sends one request or a contiguous
+batch of up to 20 notices (64 KB stored envelopes) at a time, in FIFO order.
+Requests are never combined. A later item cannot bypass a failed oldest item.
+Per-destination SQLite leases serialize dispatchers; a separate transport lease
+is shared with the reply outbox. Busy/ACK checks use the bound cc-connect session,
+not a different chat's history. A stable request/notice marker settles late ACKs
+before another POST. Startup and the existing 300-second watchdog recover missed
+idle edges and transient network failures (5–300 second retry backoff). They do
+not probe known-busy cc-connect sessions. A Grok worker releases its per-Bot lock
+and triggers the same drain on completion. No caller-side wait loop is needed.
+
+Notices expire after 24 hours, requests after 72 hours **in the delivery queue**.
+The next drain marks an unaccepted item `expired` and puts an `[EXPIRED]` notice
+in the existing origin notification outbox. The return notice itself can wait for
+the origin to become idle. An observed late ACK takes precedence over expiration.
+Accepted tasks are not expired by the delivery TTL. `--timeout` is a synchronous
+wait/response limit, not the delivery TTL; ending a wait does not cancel a queued
+request or lose its origin/reply ID. Grok sync retains its stdout-only result
+contract, including queued TIMEOUT IDs; later results stay in its checkpoint.
+
+Ambiguous Grok sends are never blindly repeated: recovery looks for the original
+user task anchor, then resumes the existing reader. Only a definitive rejection
+before input/Enter can be automatically resent. If an ACK is never persisted by
+cc-connect, exactly-once delivery cannot be guaranteed; this is durable retry
+with stable IDs and observed-marker deduplication, not a receiver transaction.
+
+Tests: `python3 tests/run_isolated.py` seeds an empty temporary registry and DB;
+`python3 tests/run_isolated.py tests.test_delivery_queue tests.test_delivery_queue_e2e`
+runs the queue acceptance subset. The end-to-end test uses a local simulated
+webhook and a separate hook server, both sessions named codex-bot, and verifies
+busy → durable queue → idle → FIFO delivery → reply outbox → origin delivery.
+Never use another real agent's identity or production DB for tests.

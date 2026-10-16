@@ -315,7 +315,10 @@ http.createServer((req, res) => {
       // direct chat with the agent) to avoid cross-contamination.
       const content = event.content || "";
       const isRelayReply = /\[cc-relay reply_to=/.test(content);
-      scheduleNotificationDrain(event);
+      // Only authoritative turn-end/idle hooks may force a destination drain.
+      if (["message.sent", "session.idle", "turn.final"].includes(event.event || event.hook_event || req.headers["x-hook-event"])) {
+        scheduleNotificationDrain(event);
+      }
       if (!isRelayReply) {
         res.statusCode = 204;
         return res.end();

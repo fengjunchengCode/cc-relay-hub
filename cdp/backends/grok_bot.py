@@ -39,6 +39,10 @@ def runtime_dir():
     return path
 
 
+class GrokNotSentError(RuntimeError):
+    """Definitive rejection before modifying the input or pressing Enter."""
+
+
 class FileLease:
     """flock works across threads/processes. close (not LOCK_UN) permits fd handoff."""
     def __init__(self, path, timeout=10):
@@ -349,12 +353,12 @@ class GrokBotBackend(ElectronCDPBackend):
     def _send_text(self, text):
         snapshot = self._snapshot()
         if snapshot['busy']:
-            raise RuntimeError('Grok Bot is busy with existing work; no message sent')
+            raise GrokNotSentError('Grok Bot is busy with existing work; no message sent')
         if snapshot['draft']:
-            raise RuntimeError('Grok Bot has an unsent draft; refusing to overwrite it')
+            raise GrokNotSentError('Grok Bot has an unsent draft; refusing to overwrite it')
         conn = self.ensure_conn()
         if conn.evaluate(self.get_chat_focus_js()) != 'FOCUSED':
-            raise RuntimeError('Grok input missing')
+            raise GrokNotSentError('Grok input missing')
         conn.send('Input.insertText', {'text': text})
         # Validate the destination again immediately before Enter.
         if conn.evaluate("document.querySelector('.sand-chat-header__name')?.innerText?.trim() || ''") != self.bot_name:
@@ -366,20 +370,27 @@ class GrokBotBackend(ElectronCDPBackend):
     def begin(self, body, request_id):
         anchor = '[cc-relay task_id=%s]' % request_id
         question = body + '\n\n' + anchor + '\n（上面是任务标识，回答无需复述标识。）'
-        self.ensure_running()
-        with self.app_lock():
-            try:
-                self._select()
-                self._send_text(question)
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    after = self._snapshot()
-                    if any(m['role'] == 'user' and anchor in m['text'] for m in after['messages']):
-                        return after
-                    time.sleep(0.2)
-                raise RuntimeError('Send unconfirmed; inspect this Bot before retrying to avoid duplicates')
-            finally:
-                self.close()
+        entered_send = False
+        try:
+            self.ensure_running()
+            with self.app_lock():
+                try:
+                    self._select()
+                    entered_send = True
+                    self._send_text(question)
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        after = self._snapshot()
+                        if any(m['role'] == 'user' and anchor in m['text'] for m in after['messages']):
+                            return after
+                        time.sleep(0.2)
+                    raise RuntimeError('Send unconfirmed; inspect this Bot before retrying to avoid duplicates')
+                finally:
+                    self.close()
+        except Exception as exc:
+            if not entered_send:
+                raise GrokNotSentError(str(exc)) from exc
+            raise
 
     def chase(self, request_id):
         with self.app_lock():
