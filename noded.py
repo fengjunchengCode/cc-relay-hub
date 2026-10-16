@@ -126,7 +126,11 @@ def _local_ips():
         pass
     try:
         if os.name == "nt":
-            output = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=5).stdout
+            # pythonw has no console to inherit; suppress a new window on each probe.
+            output = subprocess.run(
+                ["ipconfig"], capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            ).stdout
             for match in re.finditer(r"IPv4[^:]*:\s*([0-9.]+)", output):
                 add(match.group(1))
         else:
